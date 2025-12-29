@@ -1,12 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from "react"
+import React, { useEffect, useMemo, useState } from "react"
 import { jsPDF } from "jspdf"
 
 // ----------------------------
 // Storage Keys
 // ----------------------------
-const SETTINGS_KEY = "phonescanada_pta_settings_v2"
-const SLABS_KEY = "phonescanada_pta_slabs_v2"
-const DEVICES_KEY = "phonescanada_pta_devices_v2"
+const SETTINGS_KEY = "phonescanada_pta_settings_v3"
+const SLABS_KEY = "phonescanada_pta_slabs_v3"
+const DEVICES_KEY = "phonescanada_pta_devices_v3"
 
 // ----------------------------
 // Helpers
@@ -183,7 +183,7 @@ function downloadTextFile(filename, text, mime = "text/plain") {
 }
 
 // ----------------------------
-// PDF Export (simple, fast, reliable on GitHub Pages)
+// PDF Export
 // ----------------------------
 function exportPdf(devices, slabs, settings) {
   const doc = new jsPDF({ unit: "pt", format: "a4" })
@@ -235,7 +235,10 @@ function exportPdf(devices, slabs, settings) {
     y += 14
 
     addRow("Expected Sale", formatPKR(c.salePkr))
-    addRow("Base (Cost + Ship)", `${formatUSD(c.costUsd)} + ${formatUSD(c.shipUsd)}  (USD→PKR ${c.usdRate})`)
+    addRow(
+      "Base (Cost + Ship)",
+      `${formatUSD(c.costUsd)} + ${formatUSD(c.shipUsd)}  (USD→PKR ${c.usdRate})`
+    )
     addRow("Landed (CNIC)", formatPKR(c.landedCnic))
     addRow("Profit (CNIC)", formatPKR(c.profitCnic))
     addRow("Landed (Passport)", formatPKR(c.landedPassport))
@@ -262,12 +265,11 @@ export default function App() {
   const [devices, setDevices] = useState(() => safeLoad(DEVICES_KEY, []))
   const [form, setForm] = useState(EMPTY_FORM)
 
-  // Persist
   useEffect(() => safeSave(SETTINGS_KEY, settings), [settings])
   useEffect(() => safeSave(SLABS_KEY, slabs), [slabs])
   useEffect(() => safeSave(DEVICES_KEY, devices), [devices])
 
-  // Logo from repo root (works on GitHub Pages with Vite base)
+  // Logo from repo root
   const logoSrc = useMemo(() => `${import.meta.env.BASE_URL}phonescanadalogo-web.png`, [])
   const [logoOk, setLogoOk] = useState(true)
 
@@ -299,8 +301,7 @@ export default function App() {
       salePkr: clampNumber(form.salePkr, 0),
     }
     setDevices((prev) => [next, ...prev])
-    // IMPORTANT: clear the fields after adding (your request)
-    setForm(EMPTY_FORM)
+    setForm(EMPTY_FORM) // clear fields after add
   }
 
   const removeDevice = (id) => setDevices((prev) => prev.filter((d) => d.id !== id))
@@ -311,28 +312,28 @@ export default function App() {
     )
   }
 
-  const bgBlobs = useMemo(() => {
-    const blobs = [
-      { top: "12%", left: "8%", size: 520, delay: 0 },
-      { top: "8%", right: "12%", size: 460, delay: 1.2 },
-      { bottom: "10%", left: "18%", size: 480, delay: 0.8 },
-      { bottom: "12%", right: "10%", size: 520, delay: 1.6 },
-    ]
-    return blobs
-  }, [])
-
   const exportCsv = () => {
     if (!devices.length) return
     const csv = toCsv(devices, slabs, settings)
     downloadTextFile("phonescanada-pta-devices.csv", csv, "text/csv")
   }
 
-  const profitStyle = (profit) => {
+  const profitClass = (profit) => {
     const p = clampNumber(profit, 0)
     if (p > 0) return "pill pill--pos"
     if (p < 0) return "pill pill--neg"
     return "pill pill--neu"
   }
+
+  const bgBlobs = useMemo(
+    () => [
+      { top: "12%", left: "8%", size: 520, delay: 0 },
+      { top: "8%", right: "12%", size: 460, delay: 1.2 },
+      { bottom: "10%", left: "18%", size: 480, delay: 0.8 },
+      { bottom: "12%", right: "10%", size: 520, delay: 1.6 },
+    ],
+    []
+  )
 
   return (
     <div className="pc-wrap">
@@ -341,36 +342,40 @@ export default function App() {
           --bg1:#f6e2e6;
           --bg2:#e7eefb;
           --card:#ffffffcc;
-          --cardSolid:#ffffff;
           --text:#0f172a;
           --muted:#64748b;
           --line:#e5e7eb;
-          --shadow: 0 20px 60px rgba(15,23,42,.10);
           --shadow2: 0 10px 30px rgba(15,23,42,.08);
           --radius: 24px;
           --radius2: 18px;
           --brand:#ef4444;
           --brand2:#fb7185;
-          --posBg: rgba(16,185,129,.12);
-          --posBorder: rgba(16,185,129,.28);
+
+          --posBg: rgba(16,185,129,.14);
+          --posBorder: rgba(16,185,129,.30);
           --posText: #065f46;
-          --negBg: rgba(239,68,68,.10);
-          --negBorder: rgba(239,68,68,.25);
+
+          --negBg: rgba(239,68,68,.12);
+          --negBorder: rgba(239,68,68,.26);
           --negText: #7f1d1d;
+
           --neuBg: rgba(100,116,139,.12);
           --neuBorder: rgba(100,116,139,.22);
           --neuText: #334155;
         }
 
         *{ box-sizing:border-box; }
-        body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji"; color:var(--text); }
+        html, body { width: 100%; overflow-x: hidden; }
+        body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; color:var(--text); }
+
         .pc-wrap{
           min-height:100vh;
+          width:100%;
+          overflow-x:hidden;
           background: radial-gradient(900px 500px at 15% 20%, var(--bg1), transparent 60%),
                       radial-gradient(900px 500px at 85% 20%, var(--bg2), transparent 60%),
                       linear-gradient(180deg, #fff, #f8fafc);
           position:relative;
-          overflow:hidden;
         }
 
         .blobs{ position:absolute; inset:0; pointer-events:none; }
@@ -414,6 +419,7 @@ export default function App() {
           overflow:hidden;
           background: linear-gradient(135deg, rgba(239,68,68,.18), rgba(239,68,68,.08));
           border: 1px solid rgba(239,68,68,.18);
+          flex: 0 0 auto;
         }
         .logoImg{
           width: 46px;
@@ -448,8 +454,8 @@ export default function App() {
           grid-template-columns: 340px 1fr;
           gap: 18px;
           margin-top: 16px;
+          width: 100%;
         }
-
         @media (max-width: 960px){
           .grid{ grid-template-columns: 1fr; }
         }
@@ -461,6 +467,8 @@ export default function App() {
           border-radius: var(--radius);
           box-shadow: var(--shadow2);
           padding: 16px;
+          width: 100%;
+          min-width: 0;
         }
         .card h3{
           margin: 0 0 12px;
@@ -475,6 +483,7 @@ export default function App() {
           flex-direction:column;
           gap: 6px;
           margin-bottom: 12px;
+          min-width: 0;
         }
         .labelRow{
           display:flex;
@@ -486,6 +495,7 @@ export default function App() {
         }
         .input, .select{
           width:100%;
+          min-width: 0;
           border-radius: 14px;
           padding: 11px 12px;
           border: 1px solid var(--line);
@@ -493,11 +503,7 @@ export default function App() {
           outline:none;
           font-size: 14px;
         }
-        .row2{
-          display:grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 10px;
-        }
+
         .toggleRow{
           display:flex;
           align-items:center;
@@ -575,6 +581,7 @@ export default function App() {
           text-align: right;
         }
 
+        /* -------- Inventory Planning -------- */
         .planning{
           padding: 18px;
         }
@@ -584,6 +591,7 @@ export default function App() {
           justify-content:space-between;
           gap: 14px;
           margin-bottom: 14px;
+          flex-wrap: wrap;
         }
         .planningHead h2{
           margin: 0;
@@ -596,7 +604,7 @@ export default function App() {
           border: none;
           border-radius: 999px;
           padding: 12px 16px;
-          font-weight: 700;
+          font-weight: 800;
           cursor:pointer;
           background: linear-gradient(135deg, var(--brand), var(--brand2));
           color:#fff;
@@ -604,21 +612,49 @@ export default function App() {
           display:inline-flex;
           align-items:center;
           gap: 10px;
+          white-space: nowrap;
         }
         .btn:disabled{
           opacity: .55;
           cursor:not-allowed;
         }
 
+        /* FIX: responsive grid that never pushes out of viewport */
         .planningGrid{
           display:grid;
-          grid-template-columns: 180px 1fr 160px 140px 220px 170px;
           gap: 10px;
           align-items:end;
+          width: 100%;
+          min-width: 0;
+
+          /* Desktop: model gets more room than brand */
+          grid-template-columns:
+            minmax(150px, 180px)   /* Brand */
+            minmax(220px, 1.7fr)   /* Model (bigger) */
+            minmax(160px, 1fr)     /* Purchase */
+            minmax(150px, 1fr)     /* Shipping */
+            minmax(220px, 1.4fr)   /* Sale */
+            minmax(170px, 1fr);    /* Profit/Loss */
         }
-        @media (max-width: 1050px){
+
+        /* 3 columns */
+        @media (max-width: 1100px){
           .planningGrid{
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(3, minmax(180px, 1fr));
+          }
+        }
+
+        /* 2 columns */
+        @media (max-width: 760px){
+          .planningGrid{
+            grid-template-columns: repeat(2, minmax(160px, 1fr));
+          }
+        }
+
+        /* 1 column */
+        @media (max-width: 480px){
+          .planningGrid{
+            grid-template-columns: 1fr;
           }
         }
 
@@ -627,6 +663,7 @@ export default function App() {
           align-items:center;
           justify-content:flex-start;
           min-height: 44px;
+          min-width: 0;
         }
         .pill{
           display:inline-flex;
@@ -634,25 +671,28 @@ export default function App() {
           gap: 8px;
           padding: 10px 12px;
           border-radius: 999px;
-          font-weight: 800;
+          font-weight: 900;
           font-size: 13px;
           border: 1px solid transparent;
-          white-space:nowrap;
+          white-space: nowrap;
+          max-width: 100%;
         }
         .pill--pos{ background: var(--posBg); border-color: var(--posBorder); color: var(--posText); }
         .pill--neg{ background: var(--negBg); border-color: var(--negBorder); color: var(--negText); }
         .pill--neu{ background: var(--neuBg); border-color: var(--neuBorder); color: var(--neuText); }
 
+        /* -------- Devices -------- */
         .devicesCard{
           margin-top: 16px;
           padding: 18px;
         }
         .devicesHeader{
           display:flex;
-          align-items:center;
+          align-items:flex-end;
           justify-content:space-between;
           gap: 12px;
           margin-bottom: 12px;
+          flex-wrap: wrap;
         }
         .devicesHeader h2{
           margin:0;
@@ -664,25 +704,30 @@ export default function App() {
           display:grid;
           grid-template-columns: 1fr 1fr;
           gap: 14px;
+          width: 100%;
         }
         @media (max-width: 860px){
           .deviceGrid{ grid-template-columns: 1fr; }
         }
 
         .deviceCard{
-          background: rgba(255,255,255,.78);
-          border: 1px solid var(--line);
+          background: rgba(255,255,255,.82);
+          border: 1px solid rgba(229,231,235,.85);
           border-radius: var(--radius);
           box-shadow: var(--shadow2);
           overflow:hidden;
+          min-width: 0;
         }
+
+        /* More polished top */
         .deviceTop{
-          padding: 14px 14px 10px;
-          border-bottom: 1px solid var(--line);
+          padding: 14px 14px 12px;
+          border-bottom: 1px solid rgba(229,231,235,.9);
           display:flex;
           justify-content:space-between;
           align-items:flex-start;
-          gap: 10px;
+          gap: 12px;
+          background: linear-gradient(180deg, rgba(255,255,255,.95), rgba(255,255,255,.75));
         }
         .deviceBrand{
           font-size: 12px;
@@ -693,20 +738,39 @@ export default function App() {
         }
         .deviceModel{
           margin:0;
-          font-size: 22px;
+          font-size: 20px;
           letter-spacing: -0.02em;
+          line-height: 1.15;
         }
-        .deviceMeta{
-          margin: 8px 0 0;
-          color: var(--muted);
-          font-size: 13px;
+
+        .badges{
+          display:flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-top: 10px;
         }
+        .badge{
+          font-size: 12px;
+          font-weight: 800;
+          color: #334155;
+          background: rgba(99,102,241,.08);
+          border: 1px solid rgba(99,102,241,.16);
+          padding: 7px 10px;
+          border-radius: 999px;
+          white-space: nowrap;
+        }
+        .badge.gst{
+          background: rgba(239,68,68,.08);
+          border-color: rgba(239,68,68,.16);
+        }
+
         .iconBtn{
-          border: 1px solid var(--line);
-          background: rgba(255,255,255,.7);
+          border: 1px solid rgba(229,231,235,.9);
+          background: rgba(255,255,255,.75);
           border-radius: 12px;
           padding: 10px 10px;
           cursor:pointer;
+          flex: 0 0 auto;
         }
 
         .deviceBody{
@@ -720,11 +784,13 @@ export default function App() {
         @media (max-width: 520px){
           .twoCols{ grid-template-columns: 1fr; }
         }
+
         .mini{
-          border: 1px solid var(--line);
+          border: 1px solid rgba(229,231,235,.9);
           border-radius: 18px;
-          background: rgba(255,255,255,.68);
+          background: rgba(255,255,255,.70);
           padding: 12px;
+          min-width: 0;
         }
         .miniHead{
           display:flex;
@@ -732,14 +798,16 @@ export default function App() {
           justify-content:space-between;
           gap: 10px;
           margin-bottom: 10px;
+          flex-wrap: wrap;
         }
         .miniTitle{
-          font-size: 14px;
+          font-size: 12px;
           letter-spacing:.12em;
           text-transform: uppercase;
           color: var(--muted);
-          font-weight: 800;
+          font-weight: 900;
         }
+
         .miniRows{
           display:flex;
           flex-direction:column;
@@ -749,7 +817,7 @@ export default function App() {
           display:flex;
           align-items:center;
           justify-content:space-between;
-          gap: 10px;
+          gap: 12px;
           font-size: 14px;
         }
         .kv span{ color: var(--muted); }
@@ -773,6 +841,7 @@ export default function App() {
           gap: 12px;
           padding-top: 10px;
           border-top: 1px solid rgba(255,255,255,.5);
+          flex-wrap: wrap;
         }
         .exports p{
           margin:0;
@@ -785,12 +854,13 @@ export default function App() {
           flex-wrap: wrap;
         }
         .ghost{
-          border: 1px solid var(--line);
-          background: rgba(255,255,255,.7);
+          border: 1px solid rgba(229,231,235,.9);
+          background: rgba(255,255,255,.75);
           border-radius: 999px;
           padding: 12px 14px;
-          font-weight: 800;
+          font-weight: 900;
           cursor:pointer;
+          white-space: nowrap;
         }
       `}</style>
 
@@ -857,7 +927,7 @@ export default function App() {
 
               <div className="toggleRow">
                 <div>
-                  <div style={{ fontWeight: 800, fontSize: 13 }}>Animations</div>
+                  <div style={{ fontWeight: 900, fontSize: 13 }}>Animations</div>
                   <div style={{ color: "var(--muted)", fontSize: 12, marginTop: 2 }}>
                     Smooth background blobs
                   </div>
@@ -889,7 +959,7 @@ export default function App() {
                 <tbody>
                   {slabs.map((s) => (
                     <tr key={s.id}>
-                      <td style={{ color: "var(--text)", fontWeight: 800 }}>{s.range}</td>
+                      <td style={{ color: "var(--text)", fontWeight: 900 }}>{s.range}</td>
                       <td>
                         <input
                           className="slabInput"
@@ -1005,7 +1075,6 @@ export default function App() {
                   />
                 </div>
 
-                {/* NEW: Immediate Profit/Loss column */}
                 <div className="field" style={{ marginBottom: 0 }}>
                   <div className="labelRow">
                     <span>Profit / Loss (Best)</span>
@@ -1014,7 +1083,7 @@ export default function App() {
                     {liveBestProfit === null ? (
                       <span className="pill pill--neu">—</span>
                     ) : (
-                      <span className={profitStyle(liveBestProfit)}>
+                      <span className={profitClass(liveBestProfit)}>
                         {liveBestProfit >= 0 ? "Profit" : "Loss"} • {formatPKR(liveBestProfit)}
                       </span>
                     )}
@@ -1037,19 +1106,16 @@ export default function App() {
                 <div className="deviceGrid">
                   {devices.map((d) => {
                     const c = calcDevice(slabs, settings, d)
-
-                    const cnicPill = profitStyle(c.profitCnic)
-                    const passPill = profitStyle(c.profitPassport)
-
                     return (
                       <div key={d.id} className="deviceCard">
                         <div className="deviceTop">
-                          <div>
+                          <div style={{ minWidth: 0 }}>
                             <div className="deviceBrand">{c.brand || "—"}</div>
                             <h3 className="deviceModel">{c.model || "—"}</h3>
-                            <div className="deviceMeta">
-                              Slab: <b>{c.slab?.range || "—"} USD</b> • GST:{" "}
-                              <b>{Math.round(c.gstRate * 100)}%</b>
+
+                            <div className="badges">
+                              <span className="badge">Slab: {c.slab?.range || "—"} USD</span>
+                              <span className="badge gst">GST: {Math.round(c.gstRate * 100)}%</span>
                             </div>
                           </div>
 
@@ -1063,7 +1129,7 @@ export default function App() {
                             <div className="mini">
                               <div className="miniHead">
                                 <div className="miniTitle">CNIC</div>
-                                <span className={cnicPill}>
+                                <span className={profitClass(c.profitCnic)}>
                                   {c.profitCnic >= 0 ? "Profit" : "Loss"} • {formatPKR(c.profitCnic)}
                                 </span>
                               </div>
@@ -1083,7 +1149,7 @@ export default function App() {
                             <div className="mini">
                               <div className="miniHead">
                                 <div className="miniTitle">Passport</div>
-                                <span className={passPill}>
+                                <span className={profitClass(c.profitPassport)}>
                                   {c.profitPassport >= 0 ? "Profit" : "Loss"} • {formatPKR(c.profitPassport)}
                                 </span>
                               </div>
@@ -1113,18 +1179,13 @@ export default function App() {
                 </div>
               )}
 
-              {/* Exports (moved to ONE place, not per device) */}
               <div className="exports">
                 <p>Export the full device list (CSV) or printable report (Save as PDF).</p>
                 <div className="exportBtns">
                   <button className="ghost" onClick={exportCsv} disabled={!devices.length}>
                     ⬇️ CSV
                   </button>
-                  <button
-                    className="ghost"
-                    onClick={() => exportPdf(devices, slabs, settings)}
-                    disabled={!devices.length}
-                  >
+                  <button className="ghost" onClick={() => exportPdf(devices, slabs, settings)} disabled={!devices.length}>
                     ⬇️ PDF
                   </button>
                 </div>
@@ -1132,17 +1193,7 @@ export default function App() {
             </div>
           </div>
         </div>
-
-        {/* Notes:
-            - Analytics tab removed ✅
-            - Logo upload UI removed ✅ (uses phonescanadalogo-web.png from repo root)
-            - "Cards auto-fit..." removed ✅
-            - Inventory form clears after add ✅
-            - Added live Profit/Loss column ✅
-            - Device cards: profit/loss now highlighted ✅
-            - Chart / PNG export / Clear Sale removed ✅
-        */}
-      </div>
+      </div> 
     </div>
   )
 }
