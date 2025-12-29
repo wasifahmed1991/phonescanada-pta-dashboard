@@ -1,1450 +1,1267 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Plus, Trash2, Download } from "lucide-react";
 
 /**
- * PhonesCanada PTA Dashboard — App.jsx
- *
- * ✅ Logo: place your file at: /public/phonescanadalogo-web.png
- *    (NOT repo root). Vite only serves/copies from /public in build.
- *
- * This file:
- * - Fixes viewport overflow + aligned form fields (responsive grid)
- * - Clears the Inventory Planning form after "Add Device"
- * - Adds “Profit/Loss (Best)” live indicator in the form
- * - Makes PTA slabs editable + persisted in localStorage
- * - Improves device cards UI + profit/loss badges
- * - Improves PDF export styling (clean, printable report)
- * - Adds faster, smoother background animation + prism/line shapes
+ * PhonesCanada PTA Dashboard — App.jsx (single-file)
+ * Fixes included:
+ * - Inventory form resets after Add
+ * - Inventory “Profit/Loss (Best)” chip aligned + not overflowing
+ * - Device cards: no overflow for Landed values, better layout + typography
+ * - Removed “Best: …” strip inside device cards
+ * - PTA slab table column widths fixed (Value Range not shrinking)
+ * - Background blobs + prism/line shapes animate (and can be toggled)
+ * - PDF export fixed: tries jsPDF, falls back to “Print to PDF”
+ * - Logo support: uses BASE_URL + phonescanadalogo-web.png (put it in /public)
  */
 
-const STORAGE_KEY = "pc_pta_dashboard_v3";
-
-const BRANDS = ["Apple", "Samsung", "Google", "Xiaomi", "OnePlus", "Oppo", "Vivo", "Realme", "Huawei", "Other"];
+/* ------------------------- helpers ------------------------- */
+const DEFAULT_SETTINGS = {
+  usdToPkr: 278,
+  gstUnderThreshold: 0.18,
+  gstAboveThreshold: 0.25,
+  gstThresholdUsd: 500,
+  showAnimation: true,
+};
 
 const DEFAULT_SLABS = [
-  { id: "0-30", label: "0–30", min: 0, max: 30, cnic: 550, passport: 430 },
-  { id: "31-100", label: "31–100", min: 31, max: 100, cnic: 4323, passport: 3200 },
-  { id: "101-200", label: "101–200", min: 101, max: 200, cnic: 11561, passport: 9580 },
-  { id: "201-350", label: "201–350", min: 201, max: 350, cnic: 14661, passport: 12200 },
-  { id: "351-500", label: "351–500", min: 351, max: 500, cnic: 23420, passport: 17800 },
-  { id: "501+", label: "501+", min: 501, max: Infinity, cnic: 37007, passport: 36870 },
+  { id: 1, min: 0, max: 30, cnicFixed: 550, passportFixed: 430 },
+  { id: 2, min: 31, max: 100, cnicFixed: 4323, passportFixed: 3200 },
+  { id: 3, min: 101, max: 200, cnicFixed: 11561, passportFixed: 9580 },
+  { id: 4, min: 201, max: 350, cnicFixed: 14661, passportFixed: 12200 },
+  { id: 5, min: 351, max: 500, cnicFixed: 23420, passportFixed: 17800 },
+  { id: 6, min: 501, max: 99999, cnicFixed: 37007, passportFixed: 36870 },
 ];
 
-function clampNumber(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-function formatPKR(n) {
-  const x = Math.round(n);
-  return `Rs ${x.toLocaleString("en-PK")}`;
-}
-function formatUSD(n) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return "$0";
-  return `$${x.toFixed(0)}`;
-}
-function safeId() {
-  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-function findSlab(slabs, baseUsd) {
-  const v = clampNumber(baseUsd, 0);
+const BRAND_OPTIONS = [
+  "Apple",
+  "Samsung",
+  "Google",
+  "Xiaomi",
+  "OnePlus",
+  "Huawei",
+  "Oppo",
+  "Vivo",
+  "Motorola",
+  "Nokia",
+  "Sony",
+  "LG",
+  "Realme",
+  "Tecno",
+  "Infinix",
+  "Other",
+];
+
+const n0 = (v) => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
+
+const formatPKR = (n) => {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const v = Math.round(Number(n));
+  return "Rs " + v.toLocaleString("en-PK");
+};
+
+const formatUSD = (n) => {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return "$" + Number(n).toFixed(0);
+};
+
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+const findSlab = (slabs, usdValue) => {
+  const v = Number(usdValue);
   return slabs.find((s) => v >= s.min && v <= s.max) || slabs[slabs.length - 1];
-}
+};
 
-function buildReportHTML({ usdRate, gstThreshold, gstLow, gstHigh, devices, slabs, logoUrl }) {
-  const now = new Date();
-  const dateStr = now.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+const calcDevice = (device, settings, slabs) => {
+  const purchase = n0(device.purchaseUsd);
+  const ship = n0(device.shipUsd);
+  const totalUsd = purchase + ship;
+  const pkrValue = totalUsd * n0(settings.usdToPkr);
 
-  const rows = devices
-    .map((d, idx) => {
-      const baseUsd = d.purchaseUsd + d.shippingUsd;
-      const gstRate = baseUsd >= gstThreshold ? gstHigh : gstLow;
-      const slab = findSlab(slabs, baseUsd);
+  const gstRate =
+    totalUsd > settings.gstThresholdUsd
+      ? n0(settings.gstAboveThreshold)
+      : n0(settings.gstUnderThreshold);
 
-      const basePkr = baseUsd * usdRate;
-      const gstPkr = basePkr * gstRate;
+  const slab = findSlab(slabs, totalUsd);
+  const gstAmount = pkrValue * gstRate;
 
-      const landedCnic = basePkr + gstPkr + slab.cnic;
-      const landedPassport = basePkr + gstPkr + slab.passport;
+  const totalCnicTax = n0(slab.cnicFixed) + gstAmount;
+  const totalPassportTax = n0(slab.passportFixed) + gstAmount;
 
-      const profitCnic = d.salePkr - landedCnic;
-      const profitPassport = d.salePkr - landedPassport;
+  const landedCnic = pkrValue + totalCnicTax;
+  const landedPassport = pkrValue + totalPassportTax;
 
-      const bestProfit = Math.max(profitCnic, profitPassport);
-      const bestChannel = bestProfit === profitCnic ? "CNIC" : "Passport";
+  const sell = device.expectedSellPkr ? Number(device.expectedSellPkr) : null;
+  const profitCnic = sell !== null ? sell - landedCnic : null;
+  const profitPassport = sell !== null ? sell - landedPassport : null;
 
-      const pillClass = bestProfit >= 0 ? "pill pill--pos" : "pill pill--neg";
+  const marginCnic = sell ? profitCnic / sell : null;
+  const marginPassport = sell ? profitPassport / sell : null;
 
-      return `
-        <div class="card">
-          <div class="cardHead">
-            <div class="meta">
-              <div class="num">${idx + 1}</div>
-              <div>
-                <div class="title">${escapeHtml(d.brand)} <span class="muted">•</span> ${escapeHtml(d.model)}</div>
-                <div class="sub">
-                  Slab: ${escapeHtml(slab.label)} USD • GST: ${Math.round(gstRate * 100)}%
+  return {
+    totalUsd,
+    pkrValue,
+    gstRate,
+    gstAmount,
+    slab,
+    landedCnic,
+    landedPassport,
+    profitCnic,
+    profitPassport,
+    marginCnic,
+    marginPassport,
+  };
+};
+
+const bestProfit = (calc) => {
+  const c = calc?.profitCnic;
+  const p = calc?.profitPassport;
+  if (c === null && p === null) return { label: "—", value: null, mode: "na" };
+  // “Best” = higher profit (could still be negative)
+  const bestIsPassport = (p ?? -Infinity) >= (c ?? -Infinity);
+  const value = bestIsPassport ? p : c;
+  const mode = value >= 0 ? "profit" : "loss";
+  const label = value === null ? "—" : `${mode === "profit" ? "Profit" : "Loss"} · ${formatPKR(Math.abs(value))}`;
+  return { label, value, mode, bestIsPassport };
+};
+
+/* -------------------- background (animated) -------------------- */
+const AnimatedBackground = ({ active }) => {
+  const prefersReducedMotion =
+    typeof window !== "undefined" &&
+    window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  if (!active || prefersReducedMotion) return null;
+
+  return (
+    <div className="bgfx" aria-hidden="true">
+      <div className="blob b1" />
+      <div className="blob b2" />
+      <div className="blob b3" />
+
+      {/* prism-ish soft shapes */}
+      <svg className="prisms" viewBox="0 0 1200 800" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="rgba(255,80,80,0.35)" />
+            <stop offset="0.5" stopColor="rgba(120,180,255,0.25)" />
+            <stop offset="1" stopColor="rgba(190,120,255,0.28)" />
+          </linearGradient>
+          <linearGradient id="g2" x1="1" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="rgba(80,200,255,0.25)" />
+            <stop offset="1" stopColor="rgba(255,140,200,0.22)" />
+          </linearGradient>
+          <filter id="blur" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="10" />
+          </filter>
+        </defs>
+
+        {/* moving lines */}
+        <path className="line l1" d="M-50 120 C 240 40, 420 210, 720 120 S 1150 220, 1280 130" />
+        <path className="line l2" d="M-80 520 C 200 420, 520 650, 760 520 S 1060 420, 1320 600" />
+        <path className="line l3" d="M-60 340 C 220 240, 420 410, 720 340 S 1040 520, 1300 360" />
+
+        {/* soft prisms */}
+        <polygon className="prism p1" points="180,90 380,40 470,190 260,240" fill="url(#g1)" filter="url(#blur)" />
+        <polygon className="prism p2" points="760,120 980,80 1040,260 820,300" fill="url(#g2)" filter="url(#blur)" />
+        <polygon className="prism p3" points="520,520 720,470 800,640 580,690" fill="url(#g1)" filter="url(#blur)" />
+      </svg>
+    </div>
+  );
+};
+
+/* ------------------------- PDF export ------------------------- */
+async function exportPdf(devices, settings, slabs) {
+  const rows = devices.map((d, idx) => {
+    const c = calcDevice(d, settings, slabs);
+    return { idx: idx + 1, d, c };
+  });
+
+  // Try jsPDF if installed
+  try {
+    const mod = await import("jspdf");
+    const jsPDF = mod.jsPDF || mod.default;
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 48;
+    let y = 54;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(18);
+    doc.text("PhonesCanada PTA Dashboard — Report", margin, y);
+    y += 18;
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.text(`USD→PKR Rate: ${settings.usdToPkr} · GST: ${Math.round(settings.gstUnderThreshold * 100)}% / ${Math.round(settings.gstAboveThreshold * 100)}% (threshold $${settings.gstThresholdUsd})`, margin, y);
+    y += 18;
+
+    const card = (title, lines) => {
+      const boxH = 18 + lines.length * 14 + 18;
+      if (y + boxH > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = 54;
+      }
+      doc.setDrawColor(230);
+      doc.setFillColor(248, 248, 252);
+      doc.roundedRect(margin, y, pageW - margin * 2, boxH, 10, 10, "FD");
+
+      let yy = y + 18;
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(12);
+      doc.text(title, margin + 14, yy);
+      yy += 14;
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+      lines.forEach((ln) => {
+        doc.text(ln.left, margin + 14, yy);
+        doc.text(ln.right, pageW - margin - 14 - doc.getTextWidth(ln.right), yy);
+        yy += 14;
+      });
+
+      y += boxH + 14;
+    };
+
+    rows.forEach(({ idx, d, c }) => {
+      const title = `${idx}. ${d.brand || "—"} ${d.model || ""}`.trim();
+      const slabTxt =
+        c.slab.max >= 99999 ? `${c.slab.min}+ USD` : `${c.slab.min}–${c.slab.max} USD`;
+      card(title, [
+        { left: `Slab: ${slabTxt} · GST: ${Math.round(c.gstRate * 100)}%`, right: "" },
+        { left: "Expected Sale", right: d.expectedSellPkr ? formatPKR(d.expectedSellPkr) : "—" },
+        { left: "Base (Cost + Ship)", right: `${formatUSD(d.purchaseUsd)} + ${formatUSD(d.shipUsd)}  (USD→PKR ${settings.usdToPkr})` },
+        { left: "Landed (CNIC)", right: formatPKR(c.landedCnic) },
+        { left: "Profit (CNIC)", right: c.profitCnic === null ? "—" : (c.profitCnic >= 0 ? formatPKR(c.profitCnic) : `- ${formatPKR(Math.abs(c.profitCnic))}`) },
+        { left: "Landed (Passport)", right: formatPKR(c.landedPassport) },
+        { left: "Profit (Passport)", right: c.profitPassport === null ? "—" : (c.profitPassport >= 0 ? formatPKR(c.profitPassport) : `- ${formatPKR(Math.abs(c.profitPassport))}`) },
+      ]);
+    });
+
+    doc.save("phonescanada-pta-report.pdf");
+    return;
+  } catch (e) {
+    // fallback
+  }
+
+  // Fallback: print-to-PDF (always works, user saves as PDF)
+  const win = window.open("", "_blank", "noopener,noreferrer");
+  if (!win) return;
+
+  const css = `
+    body{font-family:Arial,Helvetica,sans-serif;margin:28px;background:#fff;color:#111}
+    h1{font-size:18px;margin:0 0 6px}
+    .meta{font-size:12px;color:#444;margin-bottom:16px}
+    .card{border:1px solid #e6e6ef;background:#f8f8fc;border-radius:12px;padding:14px 14px;margin:0 0 12px}
+    .title{font-weight:700;margin-bottom:6px}
+    .grid{display:grid;grid-template-columns:1fr auto;gap:8px 12px;font-size:12px}
+    .r{font-weight:700}
+    .muted{color:#666}
+    @media print { .noprint{display:none} }
+  `;
+
+  const html = `
+    <html>
+      <head><title>PhonesCanada PTA Report</title><style>${css}</style></head>
+      <body>
+        <h1>PhonesCanada PTA Dashboard — Report</h1>
+        <div class="meta">USD→PKR Rate: ${settings.usdToPkr} · GST: ${Math.round(settings.gstUnderThreshold * 100)}% / ${Math.round(settings.gstAboveThreshold * 100)}% (threshold $${settings.gstThresholdUsd})</div>
+        <div class="noprint muted">Tip: press Ctrl+P / Cmd+P → “Save as PDF”.</div>
+        ${rows
+          .map(({ idx, d, c }) => {
+            const slabTxt = c.slab.max >= 99999 ? `${c.slab.min}+ USD` : `${c.slab.min}–${c.slab.max} USD`;
+            const profitFmt = (p) =>
+              p === null ? "—" : p >= 0 ? formatPKR(p) : `- ${formatPKR(Math.abs(p))}`;
+            return `
+              <div class="card">
+                <div class="title">${idx}. ${(d.brand || "—")} ${(d.model || "")}</div>
+                <div class="muted" style="font-size:12px;margin-bottom:10px;">Slab: ${slabTxt} · GST: ${Math.round(c.gstRate * 100)}%</div>
+                <div class="grid">
+                  <div>Expected Sale</div><div class="r">${d.expectedSellPkr ? formatPKR(d.expectedSellPkr) : "—"}</div>
+                  <div>Base (Cost + Ship)</div><div class="r">${formatUSD(d.purchaseUsd)} + ${formatUSD(d.shipUsd)} <span class="muted">(USD→PKR ${settings.usdToPkr})</span></div>
+                  <div>Landed (CNIC)</div><div class="r">${formatPKR(c.landedCnic)}</div>
+                  <div>Profit (CNIC)</div><div class="r">${profitFmt(c.profitCnic)}</div>
+                  <div>Landed (Passport)</div><div class="r">${formatPKR(c.landedPassport)}</div>
+                  <div>Profit (Passport)</div><div class="r">${profitFmt(c.profitPassport)}</div>
                 </div>
               </div>
-            </div>
-            <div class="${pillClass}">${bestProfit >= 0 ? "PROFIT" : "LOSS"} • ${formatPKR(bestProfit)} <span class="muted">(${bestChannel})</span></div>
-          </div>
-
-          <div class="grid">
-            <div class="box">
-              <div class="boxTitle">Inputs</div>
-              <div class="kv"><span>Expected Sale</span><b>${formatPKR(d.salePkr)}</b></div>
-              <div class="kv"><span>Base (Cost + Ship)</span><b>${formatUSD(d.purchaseUsd)} + ${formatUSD(d.shippingUsd)} = ${formatUSD(baseUsd)}</b></div>
-              <div class="kv"><span>USD→PKR</span><b>${usdRate}</b></div>
-            </div>
-
-            <div class="box">
-              <div class="boxTitle">CNIC</div>
-              <div class="kv"><span>Landed</span><b>${formatPKR(landedCnic)}</b></div>
-              <div class="kv"><span>Profit</span><b class="${profitCnic >= 0 ? "pos" : "neg"}">${formatPKR(profitCnic)}</b></div>
-              <div class="kv"><span>PTA (slab)</span><b>${formatPKR(slab.cnic)}</b></div>
-              <div class="kv"><span>GST</span><b>${formatPKR(gstPkr)}</b></div>
-            </div>
-
-            <div class="box">
-              <div class="boxTitle">Passport</div>
-              <div class="kv"><span>Landed</span><b>${formatPKR(landedPassport)}</b></div>
-              <div class="kv"><span>Profit</span><b class="${profitPassport >= 0 ? "pos" : "neg"}">${formatPKR(profitPassport)}</b></div>
-              <div class="kv"><span>PTA (slab)</span><b>${formatPKR(slab.passport)}</b></div>
-              <div class="kv"><span>GST</span><b>${formatPKR(gstPkr)}</b></div>
-            </div>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
-
-  return `
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PhonesCanada PTA Dashboard — Report</title>
-
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-
-  <style>
-    :root{
-      --bg1:#fff5f6;
-      --bg2:#f4f8ff;
-      --card:#ffffff;
-      --ink:#0f172a;
-      --muted:#64748b;
-      --line:rgba(15,23,42,.10);
-      --shadow: 0 18px 50px rgba(15,23,42,.12);
-      --posBg: rgba(16,185,129,.14);
-      --posInk: rgb(6,95,70);
-      --negBg: rgba(239,68,68,.14);
-      --negInk: rgb(127,29,29);
-      --accent1:#ff5a6b;
-      --accent2:#7c5cff;
-    }
-    *{ box-sizing:border-box; }
-    body{
-      margin:0;
-      font-family: "Saira", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      color:var(--ink);
-      background: radial-gradient(900px 500px at 10% 10%, rgba(255,90,107,.20), transparent 55%),
-                  radial-gradient(900px 500px at 90% 20%, rgba(124,92,255,.18), transparent 55%),
-                  radial-gradient(900px 500px at 30% 90%, rgba(56,189,248,.18), transparent 55%),
-                  linear-gradient(120deg, var(--bg1), var(--bg2));
-      padding: 28px;
-    }
-    .wrap{ max-width: 980px; margin: 0 auto; }
-    .top{
-      display:flex; align-items:center; gap:14px;
-      padding:16px 18px;
-      background: rgba(255,255,255,.85);
-      border:1px solid var(--line);
-      border-radius: 18px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-    }
-    .logo{
-      width:44px; height:44px; border-radius: 14px;
-      background: linear-gradient(135deg, rgba(255,90,107,.30), rgba(124,92,255,.25));
-      display:flex; align-items:center; justify-content:center;
-      overflow:hidden;
-      border:1px solid rgba(255,255,255,.9);
-      box-shadow: 0 10px 25px rgba(15,23,42,.12);
-      flex: 0 0 auto;
-    }
-    .logo img{ width:100%; height:100%; object-fit:contain; }
-    .hTitle{ font-weight:700; font-size: 18px; margin:0; line-height:1.15; }
-    .hSub{ margin:2px 0 0; color: var(--muted); font-size: 13px; }
-    .metaRow{
-      margin-top: 10px;
-      display:flex; gap:12px; flex-wrap: wrap; color: var(--muted); font-size: 13px;
-    }
-    .chip{
-      background: rgba(255,255,255,.72);
-      border:1px solid var(--line);
-      padding: 8px 10px;
-      border-radius: 12px;
-    }
-    .card{
-      margin-top: 14px;
-      background: rgba(255,255,255,.86);
-      border:1px solid var(--line);
-      border-radius: 18px;
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(10px);
-      overflow: hidden;
-    }
-    .cardHead{
-      display:flex; align-items:flex-start; justify-content:space-between; gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-    }
-    .meta{ display:flex; align-items:center; gap: 12px; }
-    .num{
-      width:28px; height:28px; border-radius: 10px;
-      background: rgba(15,23,42,.06);
-      display:flex; align-items:center; justify-content:center;
-      font-weight:700;
-      color: rgba(15,23,42,.7);
-      flex: 0 0 auto;
-    }
-    .title{ font-size: 15px; font-weight: 700; }
-    .sub{ color: var(--muted); font-size: 12px; margin-top: 2px; }
-    .pill{
-      font-weight: 800;
-      font-size: 12px;
-      padding: 8px 10px;
-      border-radius: 999px;
-      border:1px solid var(--line);
-      white-space: nowrap;
-    }
-    .pill--pos{ background: var(--posBg); color: var(--posInk); border-color: rgba(16,185,129,.28); }
-    .pill--neg{ background: var(--negBg); color: var(--negInk); border-color: rgba(239,68,68,.28); }
-    .muted{ color: var(--muted); font-weight: 600; }
-    .grid{
-      display:grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-      padding: 14px 16px 16px;
-    }
-    .box{
-      background: rgba(255,255,255,.72);
-      border:1px solid var(--line);
-      border-radius: 14px;
-      padding: 12px;
-    }
-    .boxTitle{
-      font-size: 12px;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: rgba(15,23,42,.65);
-      font-weight: 800;
-      margin-bottom: 8px;
-    }
-    .kv{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin: 7px 0; }
-    .kv span{ color: var(--muted); font-size: 12px; }
-    .kv b{ font-size: 13px; }
-    .pos{ color: rgb(6,95,70); }
-    .neg{ color: rgb(127,29,29); }
-
-    @media (max-width: 860px){
-      body{ padding: 18px; }
-      .grid{ grid-template-columns: 1fr; }
-      .cardHead{ flex-direction: column; align-items: flex-start; }
-      .pill{ white-space: normal; }
-    }
-
-    @media print{
-      body{ background:#fff; padding: 0; }
-      .wrap{ max-width: 100%; }
-      .top, .card{ box-shadow:none; border: 1px solid #ddd; background:#fff; backdrop-filter:none; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="top">
-      <div class="logo">
-        ${logoUrl ? `<img src="${logoUrl}" alt="PhonesCanada Logo" />` : `<div style="font-weight:800;color:rgba(15,23,42,.7)">P</div>`}
-      </div>
-      <div>
-        <div class="hTitle">PhonesCanada PTA Dashboard — Report</div>
-        <div class="hSub">PTA Tax • Landed Cost • Profit (CNIC vs Passport)</div>
-        <div class="metaRow">
-          <div class="chip"><b>USD→PKR</b>: ${usdRate}</div>
-          <div class="chip"><b>GST</b>: ${Math.round(gstLow * 100)}% below / ${Math.round(gstHigh * 100)}% at or above ${gstThreshold}</div>
-          <div class="chip"><b>Generated</b>: ${escapeHtml(dateStr)}</div>
-          <div class="chip"><b>Devices</b>: ${devices.length}</div>
-        </div>
-      </div>
-    </div>
-
-    ${rows || `<div style="margin-top:14px;padding:18px;border:1px solid rgba(15,23,42,.10);border-radius:16px;background:#fff">No devices to export.</div>`}
-  </div>
-
-  <script>
-    window.onload = () => {
-      window.focus();
-      window.print();
-    };
-  </script>
-</body>
-</html>
+            `;
+          })
+          .join("")}
+        <script>window.focus(); setTimeout(()=>window.print(), 250);</script>
+      </body>
+    </html>
   `;
+
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
 }
 
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
+/* ------------------------- main app ------------------------- */
 export default function App() {
-  // --- Persisted settings/state ---
-  const [usdRate, setUsdRate] = useState(278);
-  const [animationsOn, setAnimationsOn] = useState(true);
-  const [slabs, setSlabs] = useState(DEFAULT_SLABS);
-  const [devices, setDevices] = useState([]);
+  // settings
+  const [settings, setSettings] = useState(() => {
+    const raw = localStorage.getItem("pc_pta_settings_v1");
+    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+  });
 
-  // GST rule
-  const gstThreshold = 500;
-  const gstLow = 0.18;
-  const gstHigh = 0.25;
+  // editable slabs
+  const [slabs, setSlabs] = useState(() => {
+    const raw = localStorage.getItem("pc_pta_slabs_v1");
+    return raw ? JSON.parse(raw) : DEFAULT_SLABS;
+  });
 
-  // --- Inventory Planning form ---
-  const emptyDraft = useMemo(
+  // devices list
+  const [devices, setDevices] = useState(() => {
+    const raw = localStorage.getItem("pc_pta_devices_v1");
+    return raw ? JSON.parse(raw) : [];
+  });
+
+  // inventory form (resets after add)
+  const EMPTY_FORM = useMemo(
     () => ({
       brand: "",
       model: "",
       purchaseUsd: "",
-      shippingUsd: "",
-      salePkr: "",
+      shipUsd: "",
+      expectedSellPkr: "",
     }),
     []
   );
-  const [draft, setDraft] = useState(emptyDraft);
 
-  // Refs
-  const mountedRef = useRef(false);
+  const [form, setForm] = useState(EMPTY_FORM);
 
-  // Load from localStorage
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (parsed?.usdRate) setUsdRate(parsed.usdRate);
-      if (typeof parsed?.animationsOn === "boolean") setAnimationsOn(parsed.animationsOn);
-      if (Array.isArray(parsed?.slabs) && parsed.slabs.length) setSlabs(parsed.slabs);
-      if (Array.isArray(parsed?.devices)) setDevices(parsed.devices);
-    } catch {
-      // ignore
-    }
-  }, []);
+    localStorage.setItem("pc_pta_settings_v1", JSON.stringify(settings));
+  }, [settings]);
 
-  // Save to localStorage (after initial mount)
   useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true;
-      return;
-    }
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          usdRate,
-          animationsOn,
-          slabs,
-          devices,
-        })
-      );
-    } catch {
-      // ignore
-    }
-  }, [usdRate, animationsOn, slabs, devices]);
+    localStorage.setItem("pc_pta_slabs_v1", JSON.stringify(slabs));
+  }, [slabs]);
 
-  // --- Derived: live preview profit/loss (best) from draft ---
-  const draftPreview = useMemo(() => {
-    const purchaseUsd = clampNumber(draft.purchaseUsd, NaN);
-    const shippingUsd = clampNumber(draft.shippingUsd, NaN);
-    const salePkr = clampNumber(draft.salePkr, NaN);
+  useEffect(() => {
+    localStorage.setItem("pc_pta_devices_v1", JSON.stringify(devices));
+  }, [devices]);
 
-    if (!Number.isFinite(purchaseUsd) || !Number.isFinite(shippingUsd) || !Number.isFinite(salePkr) || !draft.brand || !draft.model) {
-      return null;
-    }
+  const logoUrl = `${import.meta.env.BASE_URL}phonescanadalogo-web.png`;
 
-    const baseUsd = purchaseUsd + shippingUsd;
-    const slab = findSlab(slabs, baseUsd);
-    const gstRate = baseUsd >= gstThreshold ? gstHigh : gstLow;
+  // live preview calc for form profit/loss (best)
+  const formPreviewCalc = useMemo(() => {
+    const hasAny =
+      form.brand ||
+      form.model ||
+      String(form.purchaseUsd || "").length ||
+      String(form.shipUsd || "").length ||
+      String(form.expectedSellPkr || "").length;
 
-    const basePkr = baseUsd * usdRate;
-    const gstPkr = basePkr * gstRate;
+    if (!hasAny) return null;
 
-    const landedCnic = basePkr + gstPkr + slab.cnic;
-    const landedPassport = basePkr + gstPkr + slab.passport;
+    const tmp = {
+      brand: form.brand || "",
+      model: form.model || "",
+      purchaseUsd: form.purchaseUsd || 0,
+      shipUsd: form.shipUsd || 0,
+      expectedSellPkr: form.expectedSellPkr || null,
+    };
+    return calcDevice(tmp, settings, slabs);
+  }, [form, settings, slabs]);
 
-    const profitCnic = salePkr - landedCnic;
-    const profitPassport = salePkr - landedPassport;
+  const formBest = useMemo(() => {
+    if (!formPreviewCalc || !form.expectedSellPkr) return { label: "—", mode: "na", value: null };
+    return bestProfit(formPreviewCalc);
+  }, [formPreviewCalc, form.expectedSellPkr]);
 
-    const bestProfit = Math.max(profitCnic, profitPassport);
-    const bestChannel = bestProfit === profitCnic ? "CNIC" : "Passport";
-
-    return { bestProfit, bestChannel };
-  }, [draft, slabs, usdRate]);
-
-  // --- Handlers ---
-  function addDevice() {
-    const brand = (draft.brand || "").trim();
-    const model = (draft.model || "").trim();
-
-    const purchaseUsd = clampNumber(draft.purchaseUsd, NaN);
-    const shippingUsd = clampNumber(draft.shippingUsd, NaN);
-    const salePkr = clampNumber(draft.salePkr, NaN);
-
-    if (!brand || !model || !Number.isFinite(purchaseUsd) || !Number.isFinite(shippingUsd) || !Number.isFinite(salePkr)) return;
-
+  const addDevice = () => {
+    // minimal validation (must have purchase+ship and expected sale to be useful)
     const next = {
-      id: safeId(),
-      brand,
-      model,
-      purchaseUsd,
-      shippingUsd,
-      salePkr,
+      id: crypto?.randomUUID?.() || String(Date.now()),
+      brand: (form.brand || "").trim(),
+      model: (form.model || "").trim(),
+      purchaseUsd: form.purchaseUsd === "" ? "" : Number(form.purchaseUsd),
+      shipUsd: form.shipUsd === "" ? "" : Number(form.shipUsd),
+      expectedSellPkr: form.expectedSellPkr === "" ? "" : Number(form.expectedSellPkr),
     };
 
     setDevices((prev) => [next, ...prev]);
 
-    // ✅ Clear the form after adding (your #1 issue)
-    setDraft(emptyDraft);
-  }
+    // IMPORTANT: reset form after add (your #1 request)
+    setForm(EMPTY_FORM);
+  };
 
-  function removeDevice(id) {
-    setDevices((prev) => prev.filter((d) => d.id !== id));
-  }
+  const removeDevice = (id) => setDevices((prev) => prev.filter((d) => d.id !== id));
 
-  function exportCSV() {
+  const exportCsv = () => {
     const header = [
       "Brand",
       "Model",
-      "Purchase USD",
-      "Shipping USD",
-      "Base USD",
-      "Sale PKR",
+      "PurchaseUSD",
+      "ShipUSD",
+      "TotalUSD",
+      "USD_to_PKR",
+      "ExpectedSalePKR",
+      "GST_Rate",
       "Slab",
-      "GST %",
-      "PTA CNIC",
-      "PTA Passport",
-      "Landed CNIC",
-      "Profit CNIC",
-      "Landed Passport",
-      "Profit Passport",
-      "Best Channel",
-      "Best Profit",
+      "Landed_CNIC",
+      "Profit_CNIC",
+      "Margin_CNIC",
+      "Landed_Passport",
+      "Profit_Passport",
+      "Margin_Passport",
     ];
 
-    const lines = devices.map((d) => {
-      const baseUsd = d.purchaseUsd + d.shippingUsd;
-      const slab = findSlab(slabs, baseUsd);
-      const gstRate = baseUsd >= gstThreshold ? gstHigh : gstLow;
+    const lines = [header.join(",")];
 
-      const basePkr = baseUsd * usdRate;
-      const gstPkr = basePkr * gstRate;
-
-      const landedCnic = basePkr + gstPkr + slab.cnic;
-      const landedPassport = basePkr + gstPkr + slab.passport;
-
-      const profitCnic = d.salePkr - landedCnic;
-      const profitPassport = d.salePkr - landedPassport;
-
-      const bestProfit = Math.max(profitCnic, profitPassport);
-      const bestChannel = bestProfit === profitCnic ? "CNIC" : "Passport";
-
+    devices.forEach((d) => {
+      const c = calcDevice(d, settings, slabs);
+      const slabTxt = c.slab.max >= 99999 ? `${c.slab.min}+` : `${c.slab.min}-${c.slab.max}`;
       const row = [
-        d.brand,
-        d.model,
-        d.purchaseUsd,
-        d.shippingUsd,
-        baseUsd,
-        d.salePkr,
-        slab.label,
-        Math.round(gstRate * 100),
-        slab.cnic,
-        slab.passport,
-        Math.round(landedCnic),
-        Math.round(profitCnic),
-        Math.round(landedPassport),
-        Math.round(profitPassport),
-        bestChannel,
-        Math.round(bestProfit),
+        d.brand || "",
+        (d.model || "").replaceAll(",", " "),
+        n0(d.purchaseUsd),
+        n0(d.shipUsd),
+        c.totalUsd.toFixed(2),
+        settings.usdToPkr,
+        d.expectedSellPkr ?? "",
+        (c.gstRate * 100).toFixed(0) + "%",
+        slabTxt,
+        Math.round(c.landedCnic),
+        c.profitCnic === null ? "" : Math.round(c.profitCnic),
+        c.marginCnic === null ? "" : (c.marginCnic * 100).toFixed(2) + "%",
+        Math.round(c.landedPassport),
+        c.profitPassport === null ? "" : Math.round(c.profitPassport),
+        c.marginPassport === null ? "" : (c.marginPassport * 100).toFixed(2) + "%",
       ];
-
-      return row.map((x) => `"${String(x).replaceAll('"', '""')}"`).join(",");
+      lines.push(row.map((x) => `"${String(x).replaceAll(`"`, `""`)}"`).join(","));
     });
 
-    const csv = [header.join(","), ...lines].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
-    a.href = url;
-    a.download = `phonescanada-pta-devices-${Date.now()}.csv`;
+    a.href = URL.createObjectURL(blob);
+    a.download = "phonescanada-pta-devices.csv";
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
-  }
+    URL.revokeObjectURL(a.href);
+  };
 
-  function exportPDF() {
-    // Use BASE_URL so it works on GitHub Pages subpath
-    const logoUrl = `${import.meta.env.BASE_URL}phonescanadalogo-web.png`;
+  const onSlabChange = (id, key, value) => {
+    setSlabs((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, [key]: Number(value) } : s))
+    );
+  };
 
-    const html = buildReportHTML({
-      usdRate,
-      gstThreshold,
-      gstLow,
-      gstHigh,
-      devices: [...devices].reverse(), // print in chronological order
-      slabs,
-      logoUrl,
-    });
-
-    const w = window.open("", "_blank", "noopener,noreferrer");
-    if (!w) return;
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
-  }
-
-  // --- Computation for device cards ---
-  const computedDevices = useMemo(() => {
-    return devices.map((d) => {
-      const baseUsd = d.purchaseUsd + d.shippingUsd;
-      const slab = findSlab(slabs, baseUsd);
-      const gstRate = baseUsd >= gstThreshold ? gstHigh : gstLow;
-
-      const basePkr = baseUsd * usdRate;
-      const gstPkr = basePkr * gstRate;
-
-      const landedCnic = basePkr + gstPkr + slab.cnic;
-      const landedPassport = basePkr + gstPkr + slab.passport;
-
-      const profitCnic = d.salePkr - landedCnic;
-      const profitPassport = d.salePkr - landedPassport;
-
-      const marginCnic = d.salePkr > 0 ? (profitCnic / d.salePkr) * 100 : 0;
-      const marginPassport = d.salePkr > 0 ? (profitPassport / d.salePkr) * 100 : 0;
-
-      const bestProfit = Math.max(profitCnic, profitPassport);
-      const bestChannel = bestProfit === profitCnic ? "CNIC" : "Passport";
-
-      return {
-        ...d,
-        baseUsd,
-        slab,
-        gstRate,
-        landedCnic,
-        landedPassport,
-        profitCnic,
-        profitPassport,
-        marginCnic,
-        marginPassport,
-        bestProfit,
-        bestChannel,
-      };
-    });
-  }, [devices, slabs, usdRate]);
-
-  // --- Editable slabs handlers ---
-  function updateSlab(id, field, value) {
-    const n = clampNumber(value, 0);
-    setSlabs((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: n } : s)));
-  }
-
-  // Logo path for header (GitHub Pages safe)
-  const logoSrc = `${import.meta.env.BASE_URL}phonescanadalogo-web.png`;
-
+  /* ------------------------- UI ------------------------- */
   return (
-    <div className={`appRoot ${animationsOn ? "animOn" : "animOff"}`}>
-      <style>{css}</style>
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600&display=swap');
 
-      {/* Background layer */}
-      <div className="bg" aria-hidden="true">
-        <div className="blob b1" />
-        <div className="blob b2" />
-        <div className="blob b3" />
-        <div className="prism p1" />
-        <div className="prism p2" />
-        <div className="scan s1" />
-        <div className="scan s2" />
-      </div>
+        :root{
+          --card: rgba(255,255,255,0.72);
+          --card2: rgba(255,255,255,0.82);
+          --stroke: rgba(15, 23, 42, 0.10);
+          --shadow: 0 18px 55px rgba(2, 8, 23, 0.10);
+          --shadow2: 0 10px 30px rgba(2, 8, 23, 0.08);
+          --txt: #0f172a;
+          --muted: rgba(15, 23, 42, 0.62);
+          --goodBg: rgba(16,185,129,0.14);
+          --goodBd: rgba(16,185,129,0.35);
+          --badBg: rgba(239,68,68,0.14);
+          --badBd: rgba(239,68,68,0.35);
+        }
+
+        *{ box-sizing:border-box; }
+        html,body{ height:100%; }
+        body{
+          margin:0;
+          font-family: "Saira", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+          color: var(--txt);
+          background: radial-gradient(1200px 700px at 15% 15%, rgba(255,130,130,0.28), transparent 60%),
+                      radial-gradient(1200px 700px at 80% 35%, rgba(130,170,255,0.24), transparent 62%),
+                      radial-gradient(1200px 700px at 40% 85%, rgba(190,130,255,0.20), transparent 60%),
+                      #f6f7fb;
+          overflow-x:hidden;
+        }
+
+        /* animated background */
+        .bgfx{
+          position:fixed; inset:0;
+          z-index:0;
+          pointer-events:none;
+          overflow:hidden;
+        }
+        .blob{
+          position:absolute;
+          width:520px; height:520px;
+          border-radius:999px;
+          filter: blur(70px);
+          opacity:0.35;
+          mix-blend-mode: multiply;
+          animation: floaty 6.2s ease-in-out infinite;
+        }
+        .b1{ left:-120px; top:-120px; background: rgba(255,90,90,0.55); animation-duration: 5.2s; }
+        .b2{ right:-160px; top:120px; background: rgba(120,170,255,0.55); animation-duration: 6.1s; animation-delay: .2s;}
+        .b3{ left:240px; bottom:-220px; background: rgba(190,120,255,0.50); animation-duration: 6.8s; animation-delay: .35s;}
+
+        .prisms{
+          position:absolute; inset:0;
+          width:100%; height:100%;
+          opacity:0.55;
+          animation: drift 3.8s linear infinite;
+        }
+        .line{
+          fill:none;
+          stroke: rgba(255,255,255,0.55);
+          stroke-width: 2.2;
+          stroke-linecap: round;
+          filter: drop-shadow(0 8px 18px rgba(2,8,23,0.12));
+        }
+        .l1{ stroke: rgba(255,110,110,0.55); animation: dash 1.5s linear infinite; stroke-dasharray: 14 12; }
+        .l2{ stroke: rgba(120,180,255,0.55); animation: dash 1.25s linear infinite; stroke-dasharray: 12 10; }
+        .l3{ stroke: rgba(190,130,255,0.50); animation: dash 1.7s linear infinite; stroke-dasharray: 16 12; }
+        .prism{ opacity:0.55; animation: prism 3.2s ease-in-out infinite; }
+        .p1{ animation-delay:.0s; }
+        .p2{ animation-delay:.18s; }
+        .p3{ animation-delay:.34s; }
+
+        @keyframes floaty{
+          0%{ transform: translate(0,0) scale(1); }
+          50%{ transform: translate(18px,-14px) scale(1.04); }
+          100%{ transform: translate(0,0) scale(1); }
+        }
+        @keyframes drift{
+          0%{ transform: translate3d(0,0,0); }
+          50%{ transform: translate3d(-8px,6px,0); }
+          100%{ transform: translate3d(0,0,0); }
+        }
+        @keyframes dash{
+          to{ stroke-dashoffset: -140; }
+        }
+        @keyframes prism{
+          0%{ transform: translate(0,0); opacity:.45; }
+          50%{ transform: translate(10px,-8px); opacity:.62; }
+          100%{ transform: translate(0,0); opacity:.45; }
+        }
+
+        /* layout */
+        .wrap{
+          position:relative;
+          z-index:1;
+          max-width: 1200px;
+          margin: 22px auto 40px;
+          padding: 0 18px;
+        }
+
+        .card{
+          background: var(--card);
+          border: 1px solid var(--stroke);
+          box-shadow: var(--shadow);
+          border-radius: 26px;
+          backdrop-filter: blur(16px);
+        }
+        .card2{
+          background: var(--card2);
+          border: 1px solid var(--stroke);
+          box-shadow: var(--shadow2);
+          border-radius: 22px;
+          backdrop-filter: blur(14px);
+        }
+
+        .header{
+          display:flex; gap:14px; align-items:center;
+          padding: 18px 18px;
+        }
+        .logoBox{
+          width:54px; height:54px;
+          border-radius: 18px;
+          background: radial-gradient(circle at 30% 30%, rgba(255,110,110,.95), rgba(255,110,110,.45));
+          display:flex; align-items:center; justify-content:center;
+          box-shadow: 0 18px 40px rgba(255,110,110,0.20);
+          overflow:hidden;
+          flex: 0 0 auto;
+        }
+        .logoBox img{
+          width:100%; height:100%;
+          object-fit: cover;
+        }
+        .hTitle{
+          font-size: 22px;
+          font-weight: 600;
+          letter-spacing: 0.2px;
+          margin:0;
+          line-height: 1.2;
+        }
+        .hSub{
+          margin:4px 0 0;
+          font-size: 13px;
+          color: var(--muted);
+          font-weight: 400;
+        }
+
+        .grid{
+          display:grid;
+          grid-template-columns: 360px 1fr;
+          gap: 16px;
+          margin-top: 16px;
+          align-items:start;
+        }
+
+        @media (max-width: 980px){
+          .grid{ grid-template-columns: 1fr; }
+        }
+
+        .sectionTitle{
+          font-size: 13px;
+          letter-spacing: 1.2px;
+          text-transform: uppercase;
+          color: rgba(15,23,42,0.62);
+          font-weight: 600;
+          margin: 0 0 12px;
+        }
+
+        .pad{ padding: 16px; }
+        .row{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+        .muted{ color: var(--muted); font-size: 13px; }
+
+        .input, select{
+          width:100%;
+          height: 44px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid rgba(15,23,42,0.12);
+          background: rgba(255,255,255,0.78);
+          outline:none;
+          font-family: inherit;
+          font-size: 15px;
+          font-weight: 400;
+        }
+        .input:focus, select:focus{
+          border-color: rgba(255,110,110,0.45);
+          box-shadow: 0 0 0 4px rgba(255,110,110,0.12);
+        }
+        label{
+          display:block;
+          font-size: 13px;
+          color: rgba(15,23,42,0.70);
+          margin-bottom: 8px;
+          font-weight: 500;
+        }
+
+        .toggle{
+          display:flex; align-items:center; justify-content:space-between; gap:10px;
+          padding: 10px 0 0;
+        }
+        .switch{
+          position:relative; width: 52px; height: 30px;
+          background: rgba(15,23,42,0.12);
+          border-radius: 999px;
+          border: 1px solid rgba(15,23,42,0.10);
+          cursor:pointer;
+          flex:0 0 auto;
+        }
+        .switch.on{ background: rgba(255,110,110,0.35); border-color: rgba(255,110,110,0.35); }
+        .knob{
+          position:absolute; top: 3px; left: 3px;
+          width: 24px; height: 24px;
+          border-radius: 999px;
+          background: #fff;
+          box-shadow: 0 6px 16px rgba(2,8,23,0.18);
+          transition: transform .18s ease;
+        }
+        .switch.on .knob{ transform: translateX(22px); }
+
+        .btn{
+          height: 44px;
+          padding: 0 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(15,23,42,0.12);
+          background: rgba(255,255,255,0.75);
+          cursor:pointer;
+          font-family: inherit;
+          font-weight: 600;
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          box-shadow: 0 10px 26px rgba(2,8,23,0.06);
+        }
+        .btnPrimary{
+          border: none;
+          background: linear-gradient(135deg, rgba(255,110,110,0.98), rgba(255,110,110,0.68));
+          color: white;
+          box-shadow: 0 20px 40px rgba(255,110,110,0.22);
+        }
+        .btnSmall{
+          height: 38px;
+          padding: 0 12px;
+          font-size: 13px;
+        }
+
+        /* inventory planning form layout */
+        .planGrid{
+          display:grid;
+          grid-template-columns: 160px 1.3fr 1fr 1fr 1.2fr 190px;
+          gap: 12px;
+          align-items:end;
+        }
+        @media (max-width: 1120px){
+          .planGrid{ grid-template-columns: 1fr 1fr; }
+        }
+        @media (max-width: 520px){
+          .planGrid{ grid-template-columns: 1fr; }
+        }
+
+        .chip{
+          display:inline-flex;
+          align-items:center;
+          justify-content:center;
+          padding: 8px 12px;
+          border-radius: 999px;
+          font-weight: 700;
+          font-size: 13px;
+          border: 1px solid rgba(15,23,42,0.10);
+          white-space: nowrap;
+          min-width: 0;
+          width: 100%;
+          height: 44px;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+        .chip.profit{ background: var(--goodBg); border-color: var(--goodBd); color: rgba(6,95,70,1); }
+        .chip.loss{ background: var(--badBg); border-color: var(--badBd); color: rgba(153,27,27,1); }
+        .chip.na{ background: rgba(15,23,42,0.06); border-color: rgba(15,23,42,0.10); color: rgba(15,23,42,0.55); }
+
+        /* Devices grid */
+        .devicesWrap{ padding: 16px; }
+        .devicesHeader{
+          display:flex; align-items:baseline; justify-content:space-between; gap:10px;
+          margin-bottom: 12px;
+        }
+        .devicesHeader h2{
+          margin:0;
+          font-size: 26px;
+          font-weight: 600;
+          letter-spacing: .2px;
+        }
+        .count{ color: var(--muted); font-size: 14px; }
+
+        .cards{
+          display:grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+        }
+        @media (max-width: 860px){
+          .cards{ grid-template-columns: 1fr; }
+        }
+
+        .deviceCard{ padding: 14px; position:relative; overflow:hidden; }
+        .deviceTop{
+          display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+          margin-bottom: 10px;
+        }
+        .brand{
+          font-size: 12px;
+          letter-spacing: 2px;
+          text-transform: uppercase;
+          color: rgba(15,23,42,0.52);
+          font-weight: 600;
+          margin-bottom: 2px;
+        }
+        .model{
+          font-size: 20px;
+          font-weight: 600;
+          margin:0;
+          line-height: 1.15;
+          word-break: break-word;
+        }
+        .pillRow{
+          display:flex; gap:8px; flex-wrap:wrap;
+          margin-top: 10px;
+        }
+        .pill{
+          border-radius: 999px;
+          padding: 7px 10px;
+          font-size: 12px;
+          font-weight: 700;
+          color: rgba(15,23,42,0.70);
+          background: rgba(15,23,42,0.06);
+          border: 1px solid rgba(15,23,42,0.10);
+          white-space: nowrap;
+        }
+
+        .trash{
+          width: 40px; height: 40px;
+          border-radius: 14px;
+          border: 1px solid rgba(15,23,42,0.10);
+          background: rgba(255,255,255,0.75);
+          cursor:pointer;
+          display:flex; align-items:center; justify-content:center;
+          box-shadow: 0 10px 22px rgba(2,8,23,0.06);
+          flex: 0 0 auto;
+        }
+
+        .split{
+          display:grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 12px;
+          margin-top: 12px;
+          padding-top: 12px;
+          border-top: 1px solid rgba(15,23,42,0.08);
+        }
+        @media (max-width: 520px){
+          .split{ grid-template-columns: 1fr; }
+        }
+
+        .mini{
+          border-radius: 18px;
+          border: 1px solid rgba(15,23,42,0.10);
+          background: rgba(255,255,255,0.68);
+          padding: 12px;
+          overflow:hidden;
+        }
+        .miniHead{
+          display:flex; align-items:center; justify-content:space-between; gap:10px;
+          margin-bottom: 10px;
+        }
+        .miniTitle{
+          font-size: 14px;
+          letter-spacing: 2px;
+          text-transform: uppercase;
+          color: rgba(15,23,42,0.55);
+          font-weight: 600;
+        }
+
+        .miniChip{
+          padding: 6px 10px;
+          border-radius: 999px;
+          font-weight: 800;
+          font-size: 12px;
+          border: 1px solid rgba(15,23,42,0.10);
+          white-space: nowrap;
+          max-width: 165px;
+          overflow:hidden;
+          text-overflow: ellipsis;
+        }
+        .miniChip.profit{ background: var(--goodBg); border-color: var(--goodBd); color: rgba(6,95,70,1); }
+        .miniChip.loss{ background: var(--badBg); border-color: var(--badBd); color: rgba(153,27,27,1); }
+        .miniChip.na{ background: rgba(15,23,42,0.06); border-color: rgba(15,23,42,0.10); color: rgba(15,23,42,0.55); }
+
+        .kv{
+          display:grid;
+          grid-template-columns: 1fr auto;
+          gap: 8px 12px;
+          align-items:center;
+        }
+        .k{ color: rgba(15,23,42,0.62); font-weight: 500; }
+        .v{
+          font-weight: 700;
+          font-size: 18px;
+          max-width: 100%;
+          overflow:hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .vSmall{ font-size: 16px; }
+        .footerMeta{
+          margin-top: 12px;
+          display:grid;
+          grid-template-columns: 1fr;
+          gap: 8px;
+          color: rgba(15,23,42,0.62);
+          font-size: 13px;
+        }
+        .metaRow{
+          display:flex; justify-content:space-between; gap:12px;
+          align-items:center;
+          flex-wrap: wrap;
+        }
+        .metaRow span{ white-space: nowrap; }
+
+        /* Export bar */
+        .exportBar{
+          margin-top: 14px;
+          padding: 14px;
+          display:flex; align-items:center; justify-content:space-between; gap:12px;
+        }
+        @media (max-width: 620px){
+          .exportBar{ flex-direction:column; align-items:stretch; }
+          .exportBtns{ justify-content:stretch; }
+        }
+        .exportBtns{ display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap; }
+        .exportHint{ font-size: 14px; color: rgba(15,23,42,0.62); }
+
+        /* Slabs table */
+        .table{
+          width:100%;
+          border-collapse: separate;
+          border-spacing: 0;
+          overflow:hidden;
+          border-radius: 18px;
+          border: 1px solid rgba(15,23,42,0.10);
+          background: rgba(255,255,255,0.55);
+        }
+        .th{
+          text-align:left;
+          font-size: 12px;
+          letter-spacing: 1.2px;
+          text-transform: uppercase;
+          color: rgba(15,23,42,0.60);
+          padding: 12px 12px;
+          background: rgba(15,23,42,0.04);
+          border-bottom: 1px solid rgba(15,23,42,0.08);
+          font-weight: 700;
+        }
+        .td{
+          padding: 10px 12px;
+          border-bottom: 1px solid rgba(15,23,42,0.06);
+          vertical-align: middle;
+        }
+        .tdRange{
+          width: 140px;
+          min-width: 140px;
+          font-weight: 700;
+          color: rgba(15,23,42,0.80);
+        }
+        .tdIn{
+          width: 130px;
+        }
+        .numIn{
+          height: 40px;
+          border-radius: 14px;
+          border: 1px solid rgba(15,23,42,0.12);
+          background: rgba(255,255,255,0.72);
+          padding: 8px 10px;
+          width: 100%;
+          font-family: inherit;
+          font-size: 14px;
+        }
+        .numIn:focus{
+          border-color: rgba(120,180,255,0.50);
+          box-shadow: 0 0 0 4px rgba(120,180,255,0.14);
+          outline:none;
+        }
+      `}</style>
+
+      <AnimatedBackground active={settings.showAnimation} />
 
       <div className="wrap">
         {/* Header */}
-        <header className="headerCard">
-          <div className="brandMark">
-            {/* If logo not found, image will fail; we keep a fallback gradient */}
+        <div className="card header">
+          <div className="logoBox" title="PhonesCanada logo">
+            {/* If you put phonescanadalogo-web.png inside /public, this will work */}
             <img
-              src={logoSrc}
+              src={logoUrl}
               alt="PhonesCanada"
               onError={(e) => {
-                // hide broken image icon, keep the gradient container
+                // fallback to “P” if logo path is wrong
                 e.currentTarget.style.display = "none";
+                e.currentTarget.parentElement.textContent = "P";
+                e.currentTarget.parentElement.style.color = "white";
+                e.currentTarget.parentElement.style.fontWeight = "800";
+                e.currentTarget.parentElement.style.fontSize = "20px";
               }}
             />
           </div>
-          <div className="headText">
-            <h1>PhonesCanada PTA Dashboard</h1>
-            <p>PTA Tax • Landed Cost • Profit (CNIC vs Passport)</p>
+          <div>
+            <h1 className="hTitle">PhonesCanada PTA Dashboard</h1>
+            <p className="hSub">PTA Tax • Landed Cost • Profit (CNIC vs Passport)</p>
           </div>
-        </header>
+        </div>
 
-        <main className="layout">
+        <div className="grid">
           {/* Left column */}
-          <aside className="leftCol">
-            <section className="card">
-              <div className="cardTitle">System Preferences</div>
+          <div style={{ display: "grid", gap: 16 }}>
+            {/* Preferences */}
+            <div className="card2 pad">
+              <div className="sectionTitle">System Preferences</div>
 
-              <label className="field">
-                <span className="label">USD Rate (PKR)</span>
-                <input
-                  className="input"
-                  inputMode="decimal"
-                  value={usdRate}
-                  onChange={(e) => setUsdRate(clampNumber(e.target.value, 0))}
-                />
-              </label>
+              <label>USD Rate (PKR)</label>
+              <input
+                className="input"
+                value={settings.usdToPkr}
+                onChange={(e) => setSettings((s) => ({ ...s, usdToPkr: Number(e.target.value) }))}
+                inputMode="numeric"
+              />
 
-              <div className="toggleRow">
+              <div className="toggle">
                 <div>
-                  <div className="toggleTitle">Animations</div>
-                  <div className="toggleSub">Smooth background blobs + prism lines</div>
+                  <div style={{ fontWeight: 600 }}>Animations</div>
+                  <div className="muted">Background blobs + prisms</div>
                 </div>
-
-                <button
-                  type="button"
-                  className={`toggle ${animationsOn ? "on" : "off"}`}
-                  onClick={() => setAnimationsOn((v) => !v)}
-                  aria-pressed={animationsOn}
+                <div
+                  className={`switch ${settings.showAnimation ? "on" : ""}`}
+                  onClick={() => setSettings((s) => ({ ...s, showAnimation: !s.showAnimation }))}
+                  role="switch"
+                  aria-checked={settings.showAnimation}
                 >
-                  <span className="knob" />
-                </button>
-              </div>
-
-              <div className="hint">
-                💡 GST auto-switches at <b>${gstThreshold}</b>: {Math.round(gstLow * 100)}% below / {Math.round(gstHigh * 100)}% at or above.
-              </div>
-            </section>
-
-            <section className="card">
-              <div className="cardTitle">PTA Tax Slabs (Editable)</div>
-              <div className="table">
-                <div className="tHead">
-                  <div>Value Range (USD)</div>
-                  <div>CNIC</div>
-                  <div>Passport</div>
+                  <div className="knob" />
                 </div>
-
-                {slabs.map((s) => (
-                  <div className="tRow" key={s.id}>
-                    <div className="range">{s.label}</div>
-                    <input className="cellInput" value={s.cnic} onChange={(e) => updateSlab(s.id, "cnic", e.target.value)} />
-                    <input className="cellInput" value={s.passport} onChange={(e) => updateSlab(s.id, "passport", e.target.value)} />
-                  </div>
-                ))}
               </div>
-              <div className="tinyMuted">Saved automatically on this device (localStorage).</div>
-            </section>
-          </aside>
+
+              <div style={{ marginTop: 10 }} className="muted">
+                💡 GST auto-switches at <b>$500</b>: 18% below / 25% at or above.
+              </div>
+            </div>
+
+            {/* Slabs */}
+            <div className="card2 pad">
+              <div className="sectionTitle">PTA Tax Slabs (Editable)</div>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th className="th">Value Range (USD)</th>
+                    <th className="th">CNIC</th>
+                    <th className="th">Passport</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {slabs.map((s, i) => {
+                    const isLast = i === slabs.length - 1;
+                    const rangeTxt = isLast ? `${s.min}+` : `${s.min}–${s.max}`;
+                    return (
+                      <tr key={s.id}>
+                        <td className="td tdRange">{rangeTxt}</td>
+                        <td className="td tdIn">
+                          <input
+                            className="numIn"
+                            value={s.cnicFixed}
+                            onChange={(e) => onSlabChange(s.id, "cnicFixed", e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </td>
+                        <td className="td tdIn">
+                          <input
+                            className="numIn"
+                            value={s.passportFixed}
+                            onChange={(e) => onSlabChange(s.id, "passportFixed", e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div className="muted" style={{ marginTop: 10 }}>
+                Saved automatically on this device (localStorage).
+              </div>
+            </div>
+          </div>
 
           {/* Right column */}
-          <section className="rightCol">
+          <div style={{ display: "grid", gap: 16 }}>
             {/* Inventory Planning */}
-            <section className="card">
-              <div className="rowTop">
+            <div className="card2 pad">
+              <div className="row" style={{ marginBottom: 12 }}>
                 <div>
-                  <div className="cardTitle">Inventory Planning</div>
-                  <div className="tinyMuted">Add a device and instantly compare CNIC vs Passport.</div>
+                  <div className="sectionTitle" style={{ marginBottom: 6 }}>
+                    Inventory Planning
+                  </div>
+                  <div className="muted">Add a device and compare CNIC vs Passport.</div>
                 </div>
-
-                <button type="button" className="btnPrimary" onClick={addDevice}>
-                  <span className="plus">＋</span> Add Device
+                <button className="btn btnPrimary" onClick={addDevice}>
+                  <Plus size={18} /> Add Device
                 </button>
               </div>
 
-              {/* ✅ Fixed: aligned fields, responsive grid, no overflow */}
-              <div className="formGrid">
-                <label className="field">
-                  <span className="label">Brand</span>
+              <div className="planGrid">
+                <div>
+                  <label>Brand</label>
                   <select
-                    className="input"
-                    value={draft.brand}
-                    onChange={(e) => setDraft((p) => ({ ...p, brand: e.target.value }))}
+                    value={form.brand}
+                    onChange={(e) => setForm((f) => ({ ...f, brand: e.target.value }))}
                   >
                     <option value="">Select…</option>
-                    {BRANDS.map((b) => (
+                    {BRAND_OPTIONS.map((b) => (
                       <option key={b} value={b}>
                         {b}
                       </option>
                     ))}
                   </select>
-                </label>
+                </div>
 
-                <label className="field grow2">
-                  <span className="label">Device / Model Name</span>
+                <div>
+                  <label>Device / Model Name</label>
                   <input
                     className="input"
+                    value={form.model}
+                    onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
                     placeholder="e.g. iPhone 15 Pro Max"
-                    value={draft.model}
-                    onChange={(e) => setDraft((p) => ({ ...p, model: e.target.value }))}
                   />
-                </label>
+                </div>
 
-                <label className="field">
-                  <span className="label">Purchase Cost (USD)</span>
+                <div>
+                  <label>Purchase Cost (USD)</label>
                   <input
                     className="input"
-                    inputMode="decimal"
+                    value={form.purchaseUsd}
+                    onChange={(e) => setForm((f) => ({ ...f, purchaseUsd: e.target.value }))}
                     placeholder="e.g. 1199"
-                    value={draft.purchaseUsd}
-                    onChange={(e) => setDraft((p) => ({ ...p, purchaseUsd: e.target.value }))}
+                    inputMode="decimal"
                   />
-                </label>
+                </div>
 
-                <label className="field">
-                  <span className="label">Shipping (USD)</span>
+                <div>
+                  <label>Shipping (USD)</label>
                   <input
                     className="input"
-                    inputMode="decimal"
+                    value={form.shipUsd}
+                    onChange={(e) => setForm((f) => ({ ...f, shipUsd: e.target.value }))}
                     placeholder="e.g. 30"
-                    value={draft.shippingUsd}
-                    onChange={(e) => setDraft((p) => ({ ...p, shippingUsd: e.target.value }))}
+                    inputMode="decimal"
                   />
-                </label>
+                </div>
 
-                <label className="field grow2">
-                  <span className="label">Expected Selling Price (PKR)</span>
+                <div>
+                  <label>Expected Selling Price (PKR)</label>
                   <input
                     className="input"
-                    inputMode="decimal"
+                    value={form.expectedSellPkr}
+                    onChange={(e) => setForm((f) => ({ ...f, expectedSellPkr: e.target.value }))}
                     placeholder="e.g. 525000"
-                    value={draft.salePkr}
-                    onChange={(e) => setDraft((p) => ({ ...p, salePkr: e.target.value }))}
+                    inputMode="decimal"
                   />
-                </label>
+                </div>
 
-                {/* ✅ New: Profit/Loss (Best) live indicator */}
-                <div className="field indicator">
-                  <span className="label">Profit / Loss (Best)</span>
-                  <div className={`indicatorPill ${draftPreview ? (draftPreview.bestProfit >= 0 ? "pos" : "neg") : ""}`}>
-                    {draftPreview ? (
-                      <>
-                        <span className="indicatorK">{draftPreview.bestProfit >= 0 ? "Profit" : "Loss"}</span>
-                        <span className="indicatorV">{formatPKR(Math.abs(draftPreview.bestProfit))}</span>
-                        <span className="indicatorC">({draftPreview.bestChannel})</span>
-                      </>
-                    ) : (
-                      <span className="indicatorV">—</span>
-                    )}
+                <div>
+                  <label>Profit / Loss (Best)</label>
+                  <div className={`chip ${formBest.mode}`}>
+                    {formBest.label}
                   </div>
                 </div>
               </div>
-            </section>
+            </div>
 
             {/* Devices */}
-            <section className="card">
-              <div className="devicesTop">
+            <div className="card2 devicesWrap">
+              <div className="devicesHeader">
                 <h2>Devices</h2>
-                <div className="tinyMuted">{computedDevices.length} device(s)</div>
+                <div className="count">{devices.length} device(s)</div>
               </div>
 
-              {computedDevices.length === 0 ? (
-                <div className="empty">
-                  <div className="emptyTitle">No devices yet</div>
-                  <div className="tinyMuted">Fill the form above and click “Add Device”.</div>
-                </div>
-              ) : (
-                <div className="deviceGrid">
-                  {computedDevices.map((d) => {
-                    const pillClass = d.bestProfit >= 0 ? "pos" : "neg";
-                    return (
-                      <article className="deviceCard" key={d.id}>
-                        <div className="deviceHead">
-                          <div>
-                            <div className="brandCaps">{d.brand}</div>
-                            <div className="model">{d.model}</div>
+              <div className="cards">
+                {devices.map((d) => {
+                  const c = calcDevice(d, settings, slabs);
+                  const slabTxt =
+                    c.slab.max >= 99999 ? `${c.slab.min}+ USD` : `${c.slab.min}–${c.slab.max} USD`;
+                  const gstTxt = `${Math.round(c.gstRate * 100)}%`;
 
-                            <div className="chips">
-                              <span className="chipX">Slab: {d.slab.label} USD</span>
-                              <span className="chipX">GST: {Math.round(d.gstRate * 100)}%</span>
-                            </div>
+                  const cnicMode =
+                    d.expectedSellPkr === "" || d.expectedSellPkr == null
+                      ? "na"
+                      : c.profitCnic >= 0
+                      ? "profit"
+                      : "loss";
+                  const passMode =
+                    d.expectedSellPkr === "" || d.expectedSellPkr == null
+                      ? "na"
+                      : c.profitPassport >= 0
+                      ? "profit"
+                      : "loss";
+
+                  const profitLabel = (p) =>
+                    p == null
+                      ? "—"
+                      : p >= 0
+                      ? `PROFIT · ${formatPKR(p)}`
+                      : `LOSS · ${formatPKR(Math.abs(p))}`;
+
+                  const marginLabel = (m) =>
+                    m == null ? "—" : `${(m * 100).toFixed(1)}%`;
+
+                  return (
+                    <div className="card2 deviceCard" key={d.id}>
+                      <div className="deviceTop">
+                        <div>
+                          <div className="brand">{d.brand || "—"}</div>
+                          <p className="model">{d.model || "—"}</p>
+                          <div className="pillRow">
+                            <span className="pill">Slab: {slabTxt}</span>
+                            <span className="pill">GST: {gstTxt}</span>
                           </div>
-
-                          <button className="iconBtn" title="Remove device" onClick={() => removeDevice(d.id)}>
-                            🗑️
-                          </button>
                         </div>
 
-                        {/* Improved CNIC/Passport blocks */}
-                        <div className="miniGrid">
-                          <div className="miniCard">
+                        <button className="trash" onClick={() => removeDevice(d.id)} title="Delete">
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+
+                      <div className="split">
+                        <div className="mini">
+                          <div className="miniHead">
                             <div className="miniTitle">CNIC</div>
-                            <div className={`profitPill ${d.profitCnic >= 0 ? "pos" : "neg"}`}>
-                              {d.profitCnic >= 0 ? "PROFIT" : "LOSS"} • {formatPKR(Math.abs(d.profitCnic))}
-                            </div>
-                            <div className="kvRow">
-                              <span>Landed</span>
-                              <b>{formatPKR(d.landedCnic)}</b>
-                            </div>
-                            <div className="kvRow">
-                              <span>Margin</span>
-                              <b>{d.marginCnic.toFixed(1)}%</b>
+                            <div className={`miniChip ${cnicMode}`}>
+                              {profitLabel(c.profitCnic)}
                             </div>
                           </div>
 
-                          <div className="miniCard">
+                          <div className="kv">
+                            <div className="k">Landed</div>
+                            <div className="v">{formatPKR(c.landedCnic)}</div>
+
+                            <div className="k">Margin</div>
+                            <div className="v vSmall">{marginLabel(c.marginCnic)}</div>
+                          </div>
+                        </div>
+
+                        <div className="mini">
+                          <div className="miniHead">
                             <div className="miniTitle">Passport</div>
-                            <div className={`profitPill ${d.profitPassport >= 0 ? "pos" : "neg"}`}>
-                              {d.profitPassport >= 0 ? "PROFIT" : "LOSS"} • {formatPKR(Math.abs(d.profitPassport))}
+                            <div className={`miniChip ${passMode}`}>
+                              {profitLabel(c.profitPassport)}
                             </div>
-                            <div className="kvRow">
-                              <span>Landed</span>
-                              <b>{formatPKR(d.landedPassport)}</b>
-                            </div>
-                            <div className="kvRow">
-                              <span>Margin</span>
-                              <b>{d.marginPassport.toFixed(1)}%</b>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="deviceFoot">
-                          <div className="footLine">
-                            <span>Sale</span>
-                            <b>{formatPKR(d.salePkr)}</b>
-                          </div>
-                          <div className="footLine">
-                            <span>Cost+Ship</span>
-                            <b>
-                              {formatUSD(d.purchaseUsd)} + {formatUSD(d.shippingUsd)} • USD→PKR: {usdRate}
-                            </b>
                           </div>
 
-                          <div className={`bestBadge ${pillClass}`}>
-                            Best: {d.bestChannel} • {d.bestProfit >= 0 ? "Profit" : "Loss"} {formatPKR(Math.abs(d.bestProfit))}
+                          <div className="kv">
+                            <div className="k">Landed</div>
+                            <div className="v">{formatPKR(c.landedPassport)}</div>
+
+                            <div className="k">Margin</div>
+                            <div className="v vSmall">{marginLabel(c.marginPassport)}</div>
                           </div>
                         </div>
-                      </article>
-                    );
-                  })}
+                      </div>
+
+                      <div className="footerMeta">
+                        <div className="metaRow">
+                          <span>🧾 Sale: <b>{d.expectedSellPkr ? formatPKR(d.expectedSellPkr) : "—"}</b></span>
+                        </div>
+                        <div className="metaRow">
+                          <span>📦 Cost+Ship: <b>{formatUSD(d.purchaseUsd)}</b> + <b>{formatUSD(d.shipUsd)}</b></span>
+                          <span>💱 USD→PKR: <b>{settings.usdToPkr}</b></span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Export */}
+              <div className="card2 exportBar">
+                <div className="exportHint">
+                  Export the full device list (CSV) or printable report (PDF).
                 </div>
-              )}
-
-              {/* Export section (kept separate) */}
-              <div className="exportBar">
-                <div className="exportText">Export the full device list (CSV) or printable report (PDF).</div>
                 <div className="exportBtns">
-                  <button className="btnGhost" onClick={exportCSV}>
-                    ⬇ CSV
+                  <button className="btn btnSmall" onClick={exportCsv}>
+                    <Download size={16} /> CSV
                   </button>
-                  <button className="btnGhost" onClick={exportPDF}>
-                    ⬇ PDF
+                  <button
+                    className="btn btnSmall"
+                    onClick={() => exportPdf(devices, settings, slabs)}
+                  >
+                    <Download size={16} /> PDF
                   </button>
                 </div>
               </div>
-            </section>
-          </section>
-        </main>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
-
-const css = `
-/* Font: Saira */
-@import url('https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600;700&display=swap');
-
-:root{
-  --ink:#0b1220;
-  --muted:#64748b;
-  --card: rgba(255,255,255,.78);
-  --card2: rgba(255,255,255,.68);
-  --line: rgba(15,23,42,.10);
-  --shadow: 0 18px 50px rgba(15,23,42,.12);
-  --shadow2: 0 10px 30px rgba(15,23,42,.10);
-
-  --posBg: rgba(16,185,129,.16);
-  --posBd: rgba(16,185,129,.28);
-  --posInk: rgb(6,95,70);
-
-  --negBg: rgba(239,68,68,.16);
-  --negBd: rgba(239,68,68,.28);
-  --negInk: rgb(127,29,29);
-
-  --accent1:#ff5a6b;
-  --accent2:#7c5cff;
-  --accent3:#22c55e;
-  --accent4:#38bdf8;
-}
-
-*{ box-sizing:border-box; }
-html, body{ height:100%; }
-body{
-  margin:0;
-  font-family: "Saira", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  color: var(--ink);
-}
-
-.appRoot{
-  min-height: 100vh;
-  position: relative;
-  overflow-x: hidden; /* ✅ prevent sideways overflow */
-}
-
-.wrap{
-  position: relative;
-  z-index: 2;
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 22px 18px 40px;
-}
-
-/* Background */
-.bg{
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  background:
-    radial-gradient(900px 500px at 10% 10%, rgba(255,90,107,.24), transparent 55%),
-    radial-gradient(900px 500px at 90% 20%, rgba(124,92,255,.22), transparent 55%),
-    radial-gradient(900px 500px at 30% 90%, rgba(56,189,248,.20), transparent 55%),
-    linear-gradient(120deg, #fff3f5, #f5f8ff);
-}
-
-/* Blobs (faster, smoother) */
-.blob{
-  position:absolute;
-  width: 520px;
-  height: 520px;
-  border-radius: 999px;
-  filter: blur(26px);
-  opacity: .75;
-  transform: translate3d(0,0,0);
-}
-.b1{ left:-120px; top:-140px; background: radial-gradient(circle at 30% 30%, rgba(255,90,107,.60), rgba(255,90,107,.12)); }
-.b2{ right:-160px; top:40px; background: radial-gradient(circle at 30% 30%, rgba(124,92,255,.55), rgba(124,92,255,.12)); }
-.b3{ left: 20%; bottom:-220px; background: radial-gradient(circle at 30% 30%, rgba(56,189,248,.55), rgba(56,189,248,.10)); }
-
-.animOn .b1{ animation: drift1 5.5s ease-in-out infinite alternate; }
-.animOn .b2{ animation: drift2 6.2s ease-in-out infinite alternate; }
-.animOn .b3{ animation: drift3 6.8s ease-in-out infinite alternate; }
-
-@keyframes drift1{
-  0%{ transform: translate(-10px, 0px) scale(1); }
-  100%{ transform: translate(30px, 40px) scale(1.08); }
-}
-@keyframes drift2{
-  0%{ transform: translate(0px, 0px) scale(1); }
-  100%{ transform: translate(-50px, 30px) scale(1.10); }
-}
-@keyframes drift3{
-  0%{ transform: translate(0px, 0px) scale(1); }
-  100%{ transform: translate(40px, -30px) scale(1.06); }
-}
-
-/* Prism shapes + scan lines */
-.prism{
-  position:absolute;
-  width: 560px;
-  height: 160px;
-  border-radius: 28px;
-  transform: rotate(-12deg);
-  opacity: .42;
-  filter: blur(0px);
-  background: linear-gradient(90deg, rgba(255,90,107,.0), rgba(255,90,107,.18), rgba(124,92,255,.18), rgba(56,189,248,.18), rgba(34,197,94,.16), rgba(255,90,107,.0));
-  border: 1px solid rgba(255,255,255,.55);
-  box-shadow: 0 18px 60px rgba(15,23,42,.08);
-}
-.p1{ left: -120px; top: 46%; }
-.p2{ right: -140px; top: 62%; transform: rotate(10deg); }
-
-.scan{
-  position:absolute;
-  width: 900px;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.0), rgba(255,255,255,.55), transparent);
-  opacity: .45;
-  filter: blur(.2px);
-}
-.s1{ left:-200px; top: 22%; }
-.s2{ left:-260px; top: 74%; }
-
-.animOn .p1{ animation: prismMove 3.8s ease-in-out infinite alternate; }
-.animOn .p2{ animation: prismMove2 4.1s ease-in-out infinite alternate; }
-.animOn .s1{ animation: scan 2.8s linear infinite; }
-.animOn .s2{ animation: scan2 3.2s linear infinite; }
-
-@keyframes prismMove{
-  0%{ transform: translateX(0) rotate(-12deg); opacity:.38; }
-  100%{ transform: translateX(70px) rotate(-8deg); opacity:.52; }
-}
-@keyframes prismMove2{
-  0%{ transform: translateX(0) rotate(10deg); opacity:.30; }
-  100%{ transform: translateX(-80px) rotate(6deg); opacity:.50; }
-}
-@keyframes scan{
-  0%{ transform: translateX(-120px); opacity:.25; }
-  40%{ opacity:.55; }
-  100%{ transform: translateX(260px); opacity:.25; }
-}
-@keyframes scan2{
-  0%{ transform: translateX(220px); opacity:.20; }
-  40%{ opacity:.52; }
-  100%{ transform: translateX(-220px); opacity:.20; }
-}
-
-.animOff .blob, .animOff .prism, .animOff .scan{ animation: none !important; }
-
-/* Header */
-.headerCard{
-  display:flex;
-  align-items:center;
-  gap: 14px;
-  padding: 18px 18px;
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  background: var(--card);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(12px);
-}
-
-.brandMark{
-  width: 52px;
-  height: 52px;
-  border-radius: 18px;
-  background: linear-gradient(135deg, rgba(255,90,107,.28), rgba(124,92,255,.20));
-  border: 1px solid rgba(255,255,255,.85);
-  box-shadow: var(--shadow2);
-  overflow: hidden;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  flex: 0 0 auto;
-}
-.brandMark img{
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.headText h1{
-  margin:0;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: .2px;
-}
-.headText p{
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-weight: 400;
-}
-
-/* Layout */
-.layout{
-  margin-top: 16px;
-  display:grid;
-  grid-template-columns: 360px minmax(0, 1fr);
-  gap: 16px;
-}
-
-.leftCol, .rightCol{
-  min-width: 0; /* ✅ prevent overflow */
-}
-
-.card{
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  background: var(--card);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(12px);
-  padding: 16px;
-}
-
-.card + .card{ margin-top: 16px; }
-
-.cardTitle{
-  font-size: 13px;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-  font-weight: 800;
-  color: rgba(15,23,42,.70);
-  margin-bottom: 12px;
-}
-
-.field{
-  display:flex;
-  flex-direction: column;
-  gap: 7px;
-}
-.label{
-  color: rgba(15,23,42,.68);
-  font-size: 12px;
-  font-weight: 600;
-}
-.input{
-  height: 42px;
-  border-radius: 14px;
-  border: 1px solid rgba(15,23,42,.14);
-  padding: 0 12px;
-  outline: none;
-  background: rgba(255,255,255,.82);
-  font-family: inherit;
-  font-size: 14px;
-}
-.input:focus{
-  border-color: rgba(124,92,255,.35);
-  box-shadow: 0 0 0 4px rgba(124,92,255,.12);
-}
-
-.toggleRow{
-  margin-top: 14px;
-  display:flex;
-  align-items:center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.toggleTitle{ font-weight: 700; }
-.toggleSub{ color: var(--muted); font-size: 12px; margin-top:2px; }
-
-.toggle{
-  width: 56px;
-  height: 32px;
-  border-radius: 999px;
-  border: 1px solid rgba(15,23,42,.14);
-  background: rgba(255,255,255,.65);
-  position: relative;
-  cursor: pointer;
-}
-.toggle .knob{
-  position:absolute;
-  top: 4px;
-  left: 4px;
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
-  background: linear-gradient(135deg, rgba(255,90,107,.95), rgba(124,92,255,.85));
-  box-shadow: 0 12px 24px rgba(15,23,42,.16);
-  transition: transform .2s ease;
-}
-.toggle.on .knob{ transform: translateX(24px); }
-
-.hint{
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-/* Slabs table */
-.table{
-  border: 1px solid rgba(15,23,42,.10);
-  border-radius: 16px;
-  overflow: hidden;
-  background: rgba(255,255,255,.55);
-}
-.tHead, .tRow{
-  display:grid;
-  grid-template-columns: 1.2fr 1fr 1fr;
-  gap: 10px;
-  align-items:center;
-  padding: 10px 12px;
-}
-.tHead{
-  background: rgba(15,23,42,.04);
-  color: rgba(15,23,42,.65);
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-.tRow{
-  border-top: 1px solid rgba(15,23,42,.08);
-}
-.range{
-  font-weight: 700;
-  color: rgba(15,23,42,.75);
-}
-.cellInput{
-  height: 36px;
-  border-radius: 12px;
-  border: 1px solid rgba(15,23,42,.14);
-  background: rgba(255,255,255,.85);
-  padding: 0 10px;
-  font-family: inherit;
-}
-.tinyMuted{
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-/* Inventory Planning */
-.rowTop{
-  display:flex;
-  align-items:flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.btnPrimary{
-  height: 44px;
-  padding: 0 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.85);
-  background: linear-gradient(135deg, rgba(255,90,107,.95), rgba(255,90,107,.78));
-  color: white;
-  font-family: inherit;
-  font-weight: 800;
-  cursor: pointer;
-  box-shadow: 0 16px 40px rgba(255,90,107,.22);
-  flex: 0 0 auto;
-}
-.btnPrimary .plus{ font-size: 16px; margin-right: 6px; }
-
-.formGrid{
-  display:grid;
-  grid-template-columns: 1fr 1.4fr 1fr 1fr 1.4fr .9fr;
-  gap: 12px;
-  align-items:end;
-  min-width: 0;
-}
-.field.grow2{ grid-column: span 2; }
-
-.field.indicator{
-  min-width: 0;
-}
-.indicatorPill{
-  height: 42px;
-  border-radius: 14px;
-  border: 1px solid rgba(15,23,42,.12);
-  background: rgba(255,255,255,.70);
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  gap: 8px;
-  padding: 0 10px;
-  font-weight: 800;
-}
-.indicatorPill.pos{ background: var(--posBg); color: var(--posInk); border-color: var(--posBd); }
-.indicatorPill.neg{ background: var(--negBg); color: var(--negInk); border-color: var(--negBd); }
-.indicatorK{ opacity: .85; }
-.indicatorV{ font-weight: 900; }
-.indicatorC{ color: rgba(15,23,42,.60); font-weight: 800; }
-
-/* Devices section */
-.devicesTop{
-  display:flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-.devicesTop h2{
-  margin:0;
-  font-size: 22px;
-  font-weight: 800;
-}
-
-.empty{
-  border: 1px dashed rgba(15,23,42,.20);
-  border-radius: 18px;
-  padding: 18px;
-  background: rgba(255,255,255,.55);
-}
-.emptyTitle{
-  font-weight: 900;
-  margin-bottom: 4px;
-}
-
-.deviceGrid{
-  display:grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  min-width: 0;
-}
-
-.deviceCard{
-  border: 1px solid rgba(15,23,42,.10);
-  border-radius: 20px;
-  background: rgba(255,255,255,.82);
-  box-shadow: var(--shadow2);
-  overflow: hidden;
-}
-.deviceHead{
-  padding: 14px 14px 10px;
-  display:flex;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid rgba(15,23,42,.08);
-}
-.brandCaps{
-  letter-spacing: .22em;
-  font-weight: 900;
-  color: rgba(15,23,42,.45);
-  font-size: 12px;
-}
-.model{
-  font-size: 18px;
-  font-weight: 800;
-  margin-top: 2px;
-}
-.chips{
-  display:flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-.chipX{
-  font-size: 12px;
-  font-weight: 700;
-  color: rgba(15,23,42,.70);
-  background: rgba(15,23,42,.05);
-  border: 1px solid rgba(15,23,42,.08);
-  padding: 6px 10px;
-  border-radius: 999px;
-}
-
-.iconBtn{
-  width: 40px;
-  height: 40px;
-  border-radius: 14px;
-  border: 1px solid rgba(15,23,42,.12);
-  background: rgba(255,255,255,.75);
-  cursor: pointer;
-}
-
-.miniGrid{
-  padding: 12px 14px 6px;
-  display:grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-.miniCard{
-  border: 1px solid rgba(15,23,42,.10);
-  background: rgba(255,255,255,.65);
-  border-radius: 18px;
-  padding: 12px;
-  min-width: 0;
-}
-.miniTitle{
-  font-weight: 900;
-  letter-spacing: .16em;
-  color: rgba(15,23,42,.62);
-  text-transform: uppercase;
-  font-size: 12px;
-}
-.profitPill{
-  margin-top: 8px;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(15,23,42,.12);
-  font-weight: 900;
-  font-size: 12px;
-}
-.profitPill.pos{ background: var(--posBg); color: var(--posInk); border-color: var(--posBd); }
-.profitPill.neg{ background: var(--negBg); color: var(--negInk); border-color: var(--negBd); }
-
-.kvRow{
-  margin-top: 10px;
-  display:flex;
-  align-items:center;
-  justify-content: space-between;
-  gap: 10px;
-  color: rgba(15,23,42,.72);
-}
-.kvRow span{ color: var(--muted); font-weight: 600; }
-.kvRow b{ font-weight: 900; color: rgba(15,23,42,.88); }
-
-.deviceFoot{
-  padding: 10px 14px 14px;
-  border-top: 1px solid rgba(15,23,42,.08);
-}
-.footLine{
-  display:flex;
-  justify-content: space-between;
-  gap: 10px;
-  color: rgba(15,23,42,.74);
-  font-size: 13px;
-  margin-top: 6px;
-}
-.footLine span{ color: var(--muted); font-weight: 600; }
-.footLine b{ font-weight: 800; }
-
-.bestBadge{
-  margin-top: 10px;
-  display:inline-flex;
-  align-items:center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(15,23,42,.12);
-  font-weight: 900;
-  font-size: 12px;
-}
-.bestBadge.pos{ background: var(--posBg); color: var(--posInk); border-color: var(--posBd); }
-.bestBadge.neg{ background: var(--negBg); color: var(--negInk); border-color: var(--negBd); }
-
-/* Export bar */
-.exportBar{
-  margin-top: 14px;
-  display:flex;
-  align-items:center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  border-radius: 18px;
-  border: 1px solid rgba(15,23,42,.10);
-  background: rgba(255,255,255,.70);
-}
-.exportText{ color: rgba(15,23,42,.70); font-weight: 600; }
-.exportBtns{ display:flex; gap: 10px; }
-.btnGhost{
-  height: 44px;
-  padding: 0 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(15,23,42,.14);
-  background: rgba(255,255,255,.82);
-  cursor: pointer;
-  font-family: inherit;
-  font-weight: 900;
-  box-shadow: 0 12px 24px rgba(15,23,42,.08);
-}
-
-/* Responsive */
-@media (max-width: 1100px){
-  .layout{ grid-template-columns: 1fr; }
-  .formGrid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .field.grow2{ grid-column: span 2; }
-}
-
-@media (max-width: 760px){
-  .wrap{ padding: 18px 14px 34px; }
-  .deviceGrid{ grid-template-columns: 1fr; }
-  .miniGrid{ grid-template-columns: 1fr; }
-  .rowTop{ flex-direction: column; align-items:flex-start; }
-  .btnPrimary{ width: 100%; justify-content:center; }
-  .exportBar{ flex-direction: column; align-items: stretch; }
-  .exportBtns{ width: 100%; }
-  .btnGhost{ width: 100%; }
-}
-`;
