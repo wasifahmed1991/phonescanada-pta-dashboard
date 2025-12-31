@@ -7,3 +7,9 @@ export default defineConfig({
   plugins: [react()],
   base: '/phonescanada-pta-dashboard/',
 })
+
+export default defineConfig({
+  plugins: [react()],
+  base: "/phonescanada-pta-dashboard/",
+  build: { sourcemap: true },
+});
