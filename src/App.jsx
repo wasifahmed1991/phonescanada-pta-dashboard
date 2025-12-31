@@ -1,1315 +1,1101 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
+import { Plus, Trash2, Download } from "lucide-react";
 
 /**
- * PhonesCanada PTA Dashboard
- * - Editable PTA slabs (localStorage)
- * - Device list (localStorage)
- * - CSV + PDF export
+ * PhonesCanada PTA Dashboard (single-file App.jsx)
+ * - Uses logo from /public/phonescanadalogo-web.png (no upload)
+ * - Fixes wrapping/overflow in Inventory Planning + Device cards
+ * - Better toggle UX
+ * - PDF export (styled) + CSV export
+ * - Background animation (blobs + prism outlines + subtle moving shapes)
  */
 
-const LS_KEYS = {
-  usdPkr: "pc_pta_usdPkr_v1",
-  slabs: "pc_pta_slabs_v2",
-  devices: "pc_pta_devices_v2",
-  anim: "pc_pta_anim_v1",
+const BRANDS = ["Apple", "Samsung", "Google", "OnePlus", "Xiaomi", "Vivo", "Oppo", "Huawei", "Other"];
+
+const DEFAULT_SETTINGS = {
+  usdToPkr: 278,
+  gstUnderThreshold: 0.18,
+  gstAboveThreshold: 0.25,
+  gstThresholdUsd: 500,
+  animationEnabled: true,
 };
 
-const BRAND_OPTIONS = [
-  "Apple",
-  "Samsung",
-  "Google",
-  "Xiaomi",
-  "Realme",
-  "OnePlus",
-  "Oppo",
-  "Vivo",
-  "Infinix",
-  "Tecno",
-  "Huawei",
-  "Other",
-];
-
 const DEFAULT_SLABS = [
-  { id: "s0", label: "0–30", min: 0, max: 30, cnic: 550, passport: 430 },
-  { id: "s1", label: "31–100", min: 31, max: 100, cnic: 4323, passport: 3200 },
-  { id: "s2", label: "101–200", min: 101, max: 200, cnic: 11561, passport: 9580 },
-  { id: "s3", label: "201–350", min: 201, max: 350, cnic: 14661, passport: 12200 },
-  { id: "s4", label: "351–500", min: 351, max: 500, cnic: 23420, passport: 17800 },
-  { id: "s5", label: "501+", min: 501, max: Number.POSITIVE_INFINITY, cnic: 37007, passport: 36870 },
+  { range: "0–30", cnic: 550, passport: 430 },
+  { range: "31–100", cnic: 4323, passport: 3200 },
+  { range: "101–200", cnic: 11561, passport: 9580 },
+  { range: "201–350", cnic: 14661, passport: 12200 },
+  { range: "351–500", cnic: 23420, passport: 17800 },
+  { range: "501+", cnic: 37007, passport: 36870 },
 ];
 
-function safeNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
+const LS_SETTINGS = "pc_pta_settings_v3";
+const LS_SLABS = "pc_pta_slabs_v3";
+const LS_DEVICES = "pc_pta_devices_v3";
+
+const n = (v) => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
+
+const fmtInt = (v) => Math.round(n(v)).toLocaleString();
+const fmtPKR = (v) => `Rs ${fmtInt(v)}`;
+const fmtUSD = (v) => `$${Math.round(n(v)).toLocaleString()}`;
+
+function getSlab(costUsd, slabs) {
+  const c = n(costUsd);
+  if (c <= 30) return slabs[0];
+  if (c <= 100) return slabs[1];
+  if (c <= 200) return slabs[2];
+  if (c <= 350) return slabs[3];
+  if (c <= 500) return slabs[4];
+  return slabs[5];
 }
 
-function fmtUSD(n) {
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-}
-function fmtPKR(n) {
-  if (!Number.isFinite(n)) return "—";
-  return `Rs ${Math.round(n).toLocaleString()}`;
-}
-function fmtPct(n) {
-  if (!Number.isFinite(n)) return "—";
-  return `${n.toFixed(1)}%`;
+function calc({ costUsd, shippingUsd, expectedSalePkr, settings, slabs }) {
+  const usdToPkr = n(settings.usdToPkr);
+  const cost = n(costUsd);
+  const ship = n(shippingUsd);
+  const sale = n(expectedSalePkr);
+
+  const basePkr = (cost + ship) * usdToPkr;
+  const gstRate = cost >= n(settings.gstThresholdUsd) ? n(settings.gstAboveThreshold) : n(settings.gstUnderThreshold);
+  const gstPkr = basePkr * gstRate;
+
+  const slab = getSlab(cost, slabs);
+  const ptaCnic = n(slab.cnic);
+  const ptaPassport = n(slab.passport);
+
+  const landedCnic = basePkr + gstPkr + ptaCnic;
+  const landedPassport = basePkr + gstPkr + ptaPassport;
+
+  const profitCnic = sale - landedCnic;
+  const profitPassport = sale - landedPassport;
+
+  const marginCnic = sale > 0 ? (profitCnic / sale) * 100 : 0;
+  const marginPassport = sale > 0 ? (profitPassport / sale) * 100 : 0;
+
+  const best = profitPassport >= profitCnic ? "Passport" : "CNIC";
+  const bestProfit = best === "Passport" ? profitPassport : profitCnic;
+
+  return {
+    basePkr,
+    gstRate,
+    gstPkr,
+    slab,
+    ptaCnic,
+    ptaPassport,
+    landedCnic,
+    landedPassport,
+    profitCnic,
+    profitPassport,
+    marginCnic,
+    marginPassport,
+    best,
+    bestProfit,
+  };
 }
 
-function readLS(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-function writeLS(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // ignore
-  }
+function Pill({ tone = "neutral", children }) {
+  return <span className={`pc-pill pc-pill--${tone}`}>{children}</span>;
 }
 
-function pickSlab(slabs, usdValue) {
-  const v = safeNum(usdValue);
+function Switch({ checked, onChange, label }) {
   return (
-    slabs.find((s) => v >= s.min && v <= s.max) ||
-    slabs.find((s) => s.min === 501) ||
-    slabs[slabs.length - 1]
+    <button
+      type="button"
+      className={`pc-switch ${checked ? "is-on" : "is-off"}`}
+      onClick={() => onChange(!checked)}
+      aria-pressed={checked}
+      aria-label={label}
+    >
+      <span className="pc-switch__track" />
+      <span className="pc-switch__thumb" />
+    </button>
   );
 }
 
-// Load an image (same-origin) into a dataURL so jsPDF can embed it reliably.
-async function loadImageAsDataURL(src) {
-  const img = new Image();
-  img.crossOrigin = "anonymous";
-  const p = new Promise((resolve, reject) => {
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-  });
-  img.src = src;
-  await p;
+function Background({ enabled }) {
+  if (!enabled) return null;
+  return (
+    <div className="pc-bg" aria-hidden="true">
+      <div className="pc-blob b1" />
+      <div className="pc-blob b2" />
+      <div className="pc-blob b3" />
 
-  const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0);
-  return canvas.toDataURL("image/png");
+      {/* Prism outline mesh */}
+      <svg className="pc-prisms" viewBox="0 0 1200 800" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="pcLine" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="rgba(255, 107, 107, 0.30)" />
+            <stop offset="1" stopColor="rgba(97, 234, 255, 0.26)" />
+          </linearGradient>
+        </defs>
+        <g fill="none" stroke="url(#pcLine)" strokeWidth="1.2" opacity="0.9">
+          {Array.from({ length: 18 }).map((_, i) => {
+            const x = (i * 73) % 1200;
+            const y = ((i * 49) % 800);
+            const w = 180 + (i % 5) * 26;
+            const h = 120 + (i % 4) * 22;
+            const p = `${x},${y} ${x + w},${y + 20} ${x + w - 40},${y + h} ${x + 20},${y + h - 18}`;
+            return <polygon key={i} points={p} className={`pc-prism p${i % 6}`} />;
+          })}
+        </g>
+      </svg>
+
+      {/* A few subtle moving dots */}
+      <div className="pc-dots">
+        {Array.from({ length: 8 }).map((_, i) => (
+          <span key={i} className={`pc-dot d${i + 1}`} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
-  // IMPORTANT for GitHub Pages: BASE_URL is needed so /phonescanada-pta-dashboard/ works.
-  const logoSrc = useMemo(
-    () => `${import.meta.env.BASE_URL}phonescanadalogo-web.png`,
+  const baseUrl = (import.meta && import.meta.env && import.meta.env.BASE_URL) ? import.meta.env.BASE_URL : "/";
+  const logoSrc = `${baseUrl}phonescanadalogo-web.png`;
+
+  const [settings, setSettings] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_SETTINGS);
+      return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+    } catch {
+      return DEFAULT_SETTINGS;
+    }
+  });
+
+  const [slabs, setSlabs] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_SLABS);
+      if (!raw) return DEFAULT_SLABS;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length !== DEFAULT_SLABS.length) return DEFAULT_SLABS;
+      return parsed.map((s, i) => ({ ...DEFAULT_SLABS[i], ...s }));
+    } catch {
+      return DEFAULT_SLABS;
+    }
+  });
+
+  const [devices, setDevices] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_DEVICES);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const emptyForm = useMemo(
+    () => ({ brand: "", model: "", costUsd: "", shippingUsd: "", expectedSalePkr: "" }),
     []
   );
 
-  const [usdPkr, setUsdPkr] = useState(() => readLS(LS_KEYS.usdPkr, 278));
-  const [animations, setAnimations] = useState(() => readLS(LS_KEYS.anim, true));
-  const [slabs, setSlabs] = useState(() => readLS(LS_KEYS.slabs, DEFAULT_SLABS));
-  const [devices, setDevices] = useState(() => readLS(LS_KEYS.devices, []));
+  const [form, setForm] = useState(emptyForm);
 
-  // Inventory Planning form
-  const [brand, setBrand] = useState("");
-  const [model, setModel] = useState("");
-  const [purchaseUSD, setPurchaseUSD] = useState("");
-  const [shippingUSD, setShippingUSD] = useState("");
-  const [salePKR, setSalePKR] = useState("");
+  const formTotals = useMemo(() => {
+    return calc({
+      costUsd: form.costUsd,
+      shippingUsd: form.shippingUsd,
+      expectedSalePkr: form.expectedSalePkr,
+      settings,
+      slabs,
+    });
+  }, [form, settings, slabs]);
 
-  const purchaseN = safeNum(purchaseUSD);
-  const shippingN = safeNum(shippingUSD);
-  const baseUSD = purchaseN + shippingN;
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
+    } catch {}
+  }, [settings]);
 
-  const gstRate = baseUSD >= 500 ? 25 : 18;
-  const slab = useMemo(() => pickSlab(slabs, baseUSD), [slabs, baseUSD]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_SLABS, JSON.stringify(slabs));
+    } catch {}
+  }, [slabs]);
 
-  const computed = useMemo(() => {
-    const rate = safeNum(usdPkr) || 0;
-    const basePKR = baseUSD * rate;
-    const gst = (basePKR * gstRate) / 100;
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_DEVICES, JSON.stringify(devices));
+    } catch {}
+  }, [devices]);
 
-    const ptaCNIC = safeNum(slab?.cnic);
-    const ptaPass = safeNum(slab?.passport);
-
-    const landedCNIC = basePKR + gst + ptaCNIC;
-    const landedPass = basePKR + gst + ptaPass;
-
-    const sale = safeNum(salePKR);
-    const profitCNIC = sale - landedCNIC;
-    const profitPass = sale - landedPass;
-
-    const marginCNIC = sale > 0 ? (profitCNIC / sale) * 100 : 0;
-    const marginPass = sale > 0 ? (profitPass / sale) * 100 : 0;
-
-    const best =
-      profitPass >= profitCNIC
-        ? { mode: "Passport", profit: profitPass }
-        : { mode: "CNIC", profit: profitCNIC };
-
-    return {
-      rate,
-      basePKR,
-      gst,
-      landedCNIC,
-      landedPass,
-      sale,
-      profitCNIC,
-      profitPass,
-      marginCNIC,
-      marginPass,
-      best,
-    };
-  }, [usdPkr, baseUSD, gstRate, slab, salePKR]);
-
-  useEffect(() => writeLS(LS_KEYS.usdPkr, usdPkr), [usdPkr]);
-  useEffect(() => writeLS(LS_KEYS.anim, animations), [animations]);
-  useEffect(() => writeLS(LS_KEYS.slabs, slabs), [slabs]);
-  useEffect(() => writeLS(LS_KEYS.devices, devices), [devices]);
-
-  function resetForm() {
-    setBrand("");
-    setModel("");
-    setPurchaseUSD("");
-    setShippingUSD("");
-    setSalePKR("");
-  }
-
-  function addDevice() {
-    if (!brand || !model.trim() || purchaseN <= 0 || safeNum(salePKR) <= 0) return;
-
-    const newItem = {
-      id: crypto?.randomUUID
-        ? crypto.randomUUID()
-        : `${Date.now()}_${Math.random().toString(16).slice(2)}`,
-      brand,
-      model: model.trim(),
-      purchaseUSD: purchaseN,
-      shippingUSD: shippingN,
-      salePKR: safeNum(salePKR),
+  const addDevice = () => {
+    const d = {
+      id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      brand: form.brand || "Other",
+      model: String(form.model || "").trim() || "(Unnamed)",
+      costUsd: n(form.costUsd),
+      shippingUsd: n(form.shippingUsd),
+      expectedSalePkr: n(form.expectedSalePkr),
       createdAt: Date.now(),
     };
-    setDevices((prev) => [newItem, ...prev]);
-    resetForm();
-  }
 
-  function removeDevice(id) {
-    setDevices((prev) => prev.filter((d) => d.id !== id));
-  }
+    // Basic guard
+    if (!d.costUsd || !d.expectedSalePkr) return;
 
-  const computedDevice = (d) => {
-    const rate = safeNum(usdPkr);
-    const baseUSDd = safeNum(d.purchaseUSD) + safeNum(d.shippingUSD);
-    const gstR = baseUSDd >= 500 ? 25 : 18;
-    const slabD = pickSlab(slabs, baseUSDd);
-
-    const basePKR = baseUSDd * rate;
-    const gst = (basePKR * gstR) / 100;
-
-    const ptaCNIC = safeNum(slabD.cnic);
-    const ptaPass = safeNum(slabD.passport);
-
-    const landedCNIC = basePKR + gst + ptaCNIC;
-    const landedPass = basePKR + gst + ptaPass;
-
-    const sale = safeNum(d.salePKR);
-    const profitCNIC = sale - landedCNIC;
-    const profitPass = sale - landedPass;
-
-    const marginCNIC = sale > 0 ? (profitCNIC / sale) * 100 : 0;
-    const marginPass = sale > 0 ? (profitPass / sale) * 100 : 0;
-
-    return {
-      baseUSD: baseUSDd,
-      gstRate: gstR,
-      slab: slabD,
-      landedCNIC,
-      landedPass,
-      profitCNIC,
-      profitPass,
-      marginCNIC,
-      marginPass,
-    };
+    setDevices((prev) => [d, ...prev]);
+    // Reset inputs to empty (fix: old values should not remain)
+    setForm(emptyForm);
   };
 
-  function exportCSV() {
-    const rows = [
-      [
-        "Brand",
-        "Model",
-        "Purchase USD",
-        "Shipping USD",
-        "Base USD",
-        "GST %",
-        "Slab",
-        "Sale PKR",
-        "Landed CNIC (PKR)",
-        "Profit CNIC (PKR)",
-        "Margin CNIC %",
-        "Landed Passport (PKR)",
-        "Profit Passport (PKR)",
-        "Margin Passport %",
-      ],
-      ...devices.map((d) => {
-        const c = computedDevice(d);
-        return [
-          d.brand,
-          d.model,
-          d.purchaseUSD,
-          d.shippingUSD,
-          c.baseUSD,
-          c.gstRate,
-          c.slab.label,
-          d.salePKR,
-          Math.round(c.landedCNIC),
-          Math.round(c.profitCNIC),
-          c.marginCNIC.toFixed(1),
-          Math.round(c.landedPass),
-          Math.round(c.profitPass),
-          c.marginPass.toFixed(1),
-        ];
-      }),
+  const removeDevice = (id) => setDevices((prev) => prev.filter((x) => x.id !== id));
+
+  const exportCSV = () => {
+    const header = [
+      "Brand",
+      "Model",
+      "CostUSD",
+      "ShippingUSD",
+      "SalePKR",
+      "USDtoPKR",
+      "Slab",
+      "GST%",
+      "LandedCNIC",
+      "ProfitCNIC",
+      "MarginCNIC%",
+      "LandedPassport",
+      "ProfitPassport",
+      "MarginPassport%",
     ];
 
-    const csv = rows
-      .map((r) =>
-        r
-          .map((cell) => {
-            const s = String(cell ?? "");
-            if (/[",\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`;
-            return s;
-          })
-          .join(",")
-      )
+    const lines = [header];
+
+    devices.forEach((d) => {
+      const t = calc({ ...d, settings, slabs });
+      lines.push([
+        d.brand,
+        d.model,
+        d.costUsd,
+        d.shippingUsd,
+        d.expectedSalePkr,
+        settings.usdToPkr,
+        t.slab.range,
+        Math.round(t.gstRate * 100),
+        Math.round(t.landedCnic),
+        Math.round(t.profitCnic),
+        t.marginCnic.toFixed(1),
+        Math.round(t.landedPassport),
+        Math.round(t.profitPassport),
+        t.marginPassport.toFixed(1),
+      ]);
+    });
+
+    const csv = lines
+      .map((row) => row.map((v) => `"${String(v).replaceAll('"', '""')}"`).join(","))
       .join("\n");
 
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = "phonescanada-pta-devices.csv";
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
-  }
+  };
 
-  async function exportPDF() {
-    const doc = new jsPDF({ unit: "pt", format: "a4" });
-    const pageW = doc.internal.pageSize.getWidth();
-    const pageH = doc.internal.pageSize.getHeight();
-    const margin = 44;
+  const reportRef = useRef(null);
+  const exportPDF = async () => {
+    if (!reportRef.current) return;
 
-    // Embed logo properly (bigger + contained)
-    let logoData = null;
-    try {
-      logoData = await loadImageAsDataURL(logoSrc);
-    } catch {
-      // ignore
-    }
-
-    // Header card
-    doc.setFillColor(247, 248, 252);
-    doc.roundedRect(margin, margin, pageW - margin * 2, 64, 14, 14, "F");
-
-    if (logoData) {
-      doc.setFillColor(255, 255, 255);
-      doc.roundedRect(margin + 14, margin + 16, 160, 32, 12, 12, "F");
-      // Increased size + looks clean for wide logo
-      doc.addImage(logoData, "PNG", margin + 22, margin + 22, 144, 20);
-    }
-
-    doc.setTextColor(18, 22, 38);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text("PhonesCanada PTA Dashboard — Report", margin + 190, margin + 34);
-
-    doc.setTextColor(92, 100, 120);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    doc.text(
-      `USD/PKR Rate: ${safeNum(usdPkr)}  •  GST: 18% / 25% (threshold $500)`,
-      margin + 190,
-      margin + 50
+    // Ensure logo is loaded
+    const imgs = reportRef.current.querySelectorAll("img");
+    await Promise.all(
+      Array.from(imgs).map(
+        (img) =>
+          new Promise((res) => {
+            if (img.complete) return res(true);
+            img.onload = () => res(true);
+            img.onerror = () => res(true);
+          })
+      )
     );
 
-    let y = margin + 88;
-    const cardGap = 14;
-    const cardW = pageW - margin * 2;
-    const cardPad = 14;
-
-    const sectionCard = (titleLeft, titleRight) => {
-      doc.setFillColor(255, 255, 255);
-      doc.roundedRect(margin, y, cardW, 122, 14, 14, "F");
-
-      doc.setTextColor(18, 22, 38);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(12);
-      doc.text(titleLeft, margin + cardPad, y + 26);
-
-      if (titleRight) {
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(11);
-        doc.text(titleRight, margin + cardW - cardPad, y + 26, { align: "right" });
-      }
-
-      doc.setDrawColor(235, 238, 245);
-      doc.line(margin + cardPad, y + 38, margin + cardW - cardPad, y + 38);
-    };
-
-    const miniBox = (x, yy, label, lines) => {
-      const w = (cardW - cardPad * 2 - 10) / 2;
-      doc.setFillColor(247, 248, 252);
-      doc.roundedRect(x, yy, w, 64, 12, 12, "F");
-
-      doc.setTextColor(92, 100, 120);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(9);
-      doc.text(label, x + 12, yy + 18);
-
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
-      let ly = yy + 34;
-      for (const [k, v, tone] of lines) {
-        doc.setTextColor(92, 100, 120);
-        doc.text(k, x + 12, ly);
-        doc.setTextColor(...(tone || [18, 22, 38]));
-        doc.setFont("helvetica", "bold");
-        doc.text(v, x + w - 12, ly, { align: "right" });
-        doc.setFont("helvetica", "normal");
-        ly += 14;
-      }
-    };
-
-    devices.forEach((d, idx) => {
-      const c = computedDevice(d);
-      if (y + 140 > pageH - margin) {
-        doc.addPage();
-        y = margin;
-      }
-
-      sectionCard(`${idx + 1}. ${d.brand} ${d.model}`, fmtPKR(d.salePKR));
-      doc.setTextColor(92, 100, 120);
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(9);
-      doc.text(`Slab: ${c.slab.label} USD  •  GST: ${c.gstRate}%`, margin + cardPad, y + 56);
-
-      const innerY = y + 66;
-      const leftX = margin + cardPad;
-      const rightX = margin + cardPad + (cardW - cardPad * 2 - 10) / 2 + 10;
-
-      miniBox(leftX, innerY, "CNIC", [
-        ["Base (Cost+Ship)", `${fmtUSD(d.purchaseUSD)} + ${fmtUSD(d.shippingUSD)} (USD→PKR ${safeNum(usdPkr)})`],
-        ["Landed", fmtPKR(c.landedCNIC)],
-        ["Profit", fmtPKR(c.profitCNIC), c.profitCNIC >= 0 ? [10, 120, 80] : [190, 40, 40]],
-        ["Margin", fmtPct(c.marginCNIC)],
-      ]);
-
-      miniBox(rightX, innerY, "PASSPORT", [
-        ["Base (Cost+Ship)", `${fmtUSD(d.purchaseUSD)} + ${fmtUSD(d.shippingUSD)} (USD→PKR ${safeNum(usdPkr)})`],
-        ["Landed", fmtPKR(c.landedPass)],
-        ["Profit", fmtPKR(c.profitPass), c.profitPass >= 0 ? [10, 120, 80] : [190, 40, 40]],
-        ["Margin", fmtPct(c.marginPass)],
-      ]);
-
-      y += 122 + cardGap;
+    const canvas = await html2canvas(reportRef.current, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: "#ffffff",
+      windowWidth: 1200,
     });
 
-    doc.setTextColor(150, 155, 170);
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
-    doc.text("Generated by PhonesCanada PTA Dashboard", margin, pageH - 22);
+    const imgData = canvas.toDataURL("image/png");
+    const pdf = new jsPDF("p", "pt", "a4");
 
-    doc.save("phonescanada-pta-report.pdf");
-  }
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
 
-  const bestBadge = (() => {
-    const sale = computed.sale;
-    if (!sale || purchaseN <= 0) return { label: "—", tone: "neutral" };
-    const profit = computed.best.profit;
-    const prefix = profit >= 0 ? "Profit" : "Loss";
-    const tone = profit >= 0 ? "good" : "bad";
-    return {
-      label: `${computed.best.mode} • ${prefix} ${fmtPKR(Math.abs(profit)).replace("Rs ", "Rs ")}`,
-      tone,
-    };
-  })();
+    // Fit image into A4
+    const imgW = pageW;
+    const imgH = (canvas.height * imgW) / canvas.width;
 
-  const inventoryValid = brand && model.trim() && purchaseN > 0 && safeNum(salePKR) > 0;
+    let y = 0;
+    let remaining = imgH;
+
+    while (remaining > 0) {
+      pdf.addImage(imgData, "PNG", 0, y, imgW, imgH);
+      remaining -= pageH;
+      if (remaining > 0) {
+        pdf.addPage();
+        y -= pageH;
+      }
+    }
+
+    pdf.save("phonescanada-pta-report.pdf");
+  };
+
+  const updateSlab = (idx, key, value) => {
+    setSlabs((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], [key]: Math.max(0, n(value)) };
+      return next;
+    });
+  };
 
   return (
-    <div className="pc-root">
+    <>
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600&display=swap');
+
         :root{
-          --pc-bg1:#ffd1d7;
-          --pc-bg2:#d8e8ff;
-          --pc-bg3:#c9ffe8;
-          --pc-ink:#0f172a;
-          --pc-muted:#5b6477;
-          --pc-border:rgba(15,23,42,.10);
-          --pc-card:rgba(255,255,255,.74);
-          --pc-shadow: 0 14px 40px rgba(15,23,42,.10);
-          --pc-shadow2: 0 10px 28px rgba(15,23,42,.08);
-          --pc-radius: 22px;
-          --pc-good-bg: rgba(16,185,129,.12);
-          --pc-good-bd: rgba(16,185,129,.30);
-          --pc-good: #0b6b4a;
-          --pc-bad-bg: rgba(239,68,68,.12);
-          --pc-bad-bd: rgba(239,68,68,.30);
-          --pc-bad: #9b1c1c;
-          --pc-chip: rgba(15,23,42,.06);
+          --pc-bg1: #ffb3bf;
+          --pc-bg2: #b9d4ff;
+          --pc-bg3: #bff8ee;
+          --pc-ink: #0f172a;
+          --pc-muted: rgba(15, 23, 42, 0.62);
+          --pc-card: rgba(255,255,255,0.66);
+          --pc-card2: rgba(255,255,255,0.78);
+          --pc-stroke: rgba(15, 23, 42, 0.10);
+          --pc-shadow: 0 18px 44px rgba(15, 23, 42, 0.12);
+          --pc-shadow2: 0 10px 24px rgba(15, 23, 42, 0.10);
+          --pc-radius: 26px;
+          --pc-radius-sm: 18px;
         }
 
-        *{ box-sizing:border-box; }
-        html,body,#root{ height:100%; }
+        *{ box-sizing: border-box; }
         body{
           margin:0;
-          font-family: "Saira", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
-          font-weight: 400;
+          font-family: 'Saira', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
           color: var(--pc-ink);
-          background: linear-gradient(120deg,var(--pc-bg1),var(--pc-bg2),var(--pc-bg3));
-          overflow-x:hidden;
+          background: linear-gradient(135deg, var(--pc-bg1), var(--pc-bg2), var(--pc-bg3));
+          min-height: 100vh;
+          overflow-x: hidden;
         }
 
-        .pc-root{ min-height:100%; position:relative; }
-
-        /* Background layer */
-        .pc-bg{
-          position:fixed; inset:0;
-          pointer-events:none;
-          z-index:0;
-          overflow:hidden;
-        }
+        /* Background */
+        .pc-bg{ position: fixed; inset: 0; z-index: 0; pointer-events:none; }
         .pc-blob{
           position:absolute;
-          width: 520px; height:520px;
-          filter: blur(28px);
-          opacity:.55;
+          width: 640px; height: 640px;
           border-radius: 999px;
-          mix-blend-mode: screen;
-          animation: blobMove 10s ease-in-out infinite alternate;
+          filter: blur(42px);
+          opacity: .42;
+          mix-blend-mode: soft-light;
+          animation: blob 10s ease-in-out infinite;
         }
-        .pc-blob.b1{ left:-160px; top:-160px; background: radial-gradient(circle at 30% 30%, rgba(255,90,124,.75), rgba(255,90,124,0)); animation-duration: 11s; }
-        .pc-blob.b2{ right:-180px; top:10%; background: radial-gradient(circle at 30% 30%, rgba(96,165,250,.70), rgba(96,165,250,0)); animation-duration: 12s; }
-        .pc-blob.b3{ left:10%; bottom:-200px; background: radial-gradient(circle at 30% 30%, rgba(34,197,94,.55), rgba(34,197,94,0)); animation-duration: 13s; }
+        .pc-blob.b1{ left:-240px; top:-220px; background: radial-gradient(circle at 30% 30%, rgba(255,96,96,.95), rgba(255,96,96,0)); }
+        .pc-blob.b2{ right:-260px; top:40px; background: radial-gradient(circle at 30% 30%, rgba(99,102,241,.92), rgba(99,102,241,0)); animation-delay: -3s; }
+        .pc-blob.b3{ left: 18%; bottom:-340px; background: radial-gradient(circle at 30% 30%, rgba(34,211,238,.92), rgba(34,211,238,0)); animation-delay: -6s; }
 
-        .pc-prism{
+        @keyframes blob{
+          0%{ transform: translate3d(0,0,0) scale(1); }
+          33%{ transform: translate3d(40px, -30px, 0) scale(1.08); }
+          66%{ transform: translate3d(-36px, 24px, 0) scale(0.96); }
+          100%{ transform: translate3d(0,0,0) scale(1); }
+        }
+
+        .pc-prisms{ position:absolute; inset:0; opacity:.65; animation: prisms 9s linear infinite; }
+        .pc-prism{ filter: drop-shadow(0 10px 18px rgba(15,23,42,0.08)); }
+        .pc-prism.p0{ opacity:.40 }
+        .pc-prism.p1{ opacity:.55 }
+        .pc-prism.p2{ opacity:.35 }
+        .pc-prism.p3{ opacity:.48 }
+        .pc-prism.p4{ opacity:.42 }
+        .pc-prism.p5{ opacity:.38 }
+
+        @keyframes prisms{
+          0%{ transform: translate3d(0,0,0); }
+          50%{ transform: translate3d(-22px, 14px, 0); }
+          100%{ transform: translate3d(0,0,0); }
+        }
+
+        .pc-dots{ position:absolute; inset:0; }
+        .pc-dot{
           position:absolute;
-          width: 240px; height: 240px;
-          border-radius: 36px;
-          border: 2px solid rgba(255,255,255,.22);
-          box-shadow: 0 0 0 1px rgba(15,23,42,.05) inset;
-          transform: rotate(12deg);
-          opacity:.40;
-          animation: prismFloat 7s ease-in-out infinite alternate;
+          width: 10px; height: 10px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.55);
+          box-shadow: 0 10px 22px rgba(15,23,42,0.10);
+          animation: floaty 6.5s ease-in-out infinite;
         }
-        .pc-prism.p1{ left:8%; top:28%; }
-        .pc-prism.p2{ right:10%; bottom:16%; width:180px; height:180px; border-radius: 28px; animation-duration: 6.5s; transform: rotate(-10deg); }
+        .pc-dot.d1{ left: 12%; top: 18%; animation-duration: 7.2s; }
+        .pc-dot.d2{ left: 78%; top: 22%; animation-duration: 6.0s; animation-delay: -1.1s; }
+        .pc-dot.d3{ left: 62%; top: 64%; animation-duration: 7.8s; animation-delay: -2.3s; }
+        .pc-dot.d4{ left: 20%; top: 72%; animation-duration: 6.2s; animation-delay: -3.2s; }
+        .pc-dot.d5{ left: 42%; top: 38%; animation-duration: 8.4s; animation-delay: -2.0s; }
+        .pc-dot.d6{ left: 90%; top: 58%; animation-duration: 7.0s; animation-delay: -4.0s; }
+        .pc-dot.d7{ left: 8%; top: 52%; animation-duration: 6.8s; animation-delay: -5.1s; }
+        .pc-dot.d8{ left: 52%; top: 14%; animation-duration: 7.6s; animation-delay: -3.7s; }
 
-        .pc-dots{
-          position:absolute; inset:0;
-          background-image: radial-gradient(rgba(255,255,255,.16) 1px, transparent 1px);
-          background-size: 34px 34px;
-          opacity:.20;
-          animation: dotsDrift 9s linear infinite;
-        }
-
-        @keyframes blobMove{
-          from{ transform: translate3d(0,0,0) scale(1); }
-          to{ transform: translate3d(120px,80px,0) scale(1.12); }
-        }
-        @keyframes prismFloat{
-          from{ transform: translate3d(0,0,0) rotate(12deg); }
-          to{ transform: translate3d(24px,-18px,0) rotate(16deg); }
-        }
-        @keyframes dotsDrift{
-          from{ transform: translate3d(0,0,0); }
-          to{ transform: translate3d(40px,-30px,0); }
+        @keyframes floaty{
+          0%{ transform: translate3d(0,0,0) scale(1); opacity:.55; }
+          50%{ transform: translate3d(10px,-14px,0) scale(1.14); opacity:.75; }
+          100%{ transform: translate3d(0,0,0) scale(1); opacity:.55; }
         }
 
-        /* Layout */
-        .pc-shell{
-          position:relative;
-          z-index:1;
-          max-width: 1200px;
-          margin: 0 auto;
-          padding: 24px 18px 54px;
-        }
+        /* App shell */
+        .pc-shell{ position: relative; z-index: 1; padding: 28px 18px 60px; }
+        .pc-wrap{ max-width: 1220px; margin: 0 auto; }
 
         .pc-header{
           display:flex;
           align-items:center;
-          gap: 14px;
-          padding: 16px 18px;
-          border-radius: var(--pc-radius);
+          gap: 16px;
+          padding: 18px 18px;
           background: var(--pc-card);
-          border: 1px solid var(--pc-border);
+          border: 1px solid var(--pc-stroke);
+          border-radius: var(--pc-radius);
           box-shadow: var(--pc-shadow);
-          backdrop-filter: blur(10px);
+          backdrop-filter: blur(14px);
         }
 
-        /* LOGO FIX (WEB) */
         .pc-brandmark{
-          width: 84px;
-          height: 64px;
-          border-radius: 18px;
-          background: linear-gradient(140deg, rgba(255,90,124,.25), rgba(96,165,250,.18));
-          border: 1px solid rgba(15,23,42,.10);
+          width: 170px;
+          height: 60px;
+          border-radius: 16px;
+          background: rgba(255,255,255,0.60);
+          border: 1px solid rgba(15,23,42,0.12);
+          box-shadow: 0 10px 22px rgba(15,23,42,0.10);
           display:flex;
           align-items:center;
           justify-content:center;
           overflow:hidden;
+          flex: 0 0 auto;
         }
-        .pc-brandmark img{
-          width: 140px;            /* wide logo */
-          height: 28px;            /* keep it crisp */
-          object-fit: contain;
-          filter: drop-shadow(0 6px 18px rgba(15,23,42,.10));
-        }
+        .pc-brandmark img{ width: 92%; height: 92%; object-fit: contain; display:block; }
 
-        .pc-hTitle{
-          margin:0;
-          font-size: 24px;
-          letter-spacing: .2px;
-          font-weight: 600; /* lighter than before */
-          line-height: 1.1;
-        }
-        .pc-hSub{
-          margin-top: 6px;
-          color: var(--pc-muted);
-          font-size: 14px;
-          font-weight: 400;
-        }
+        .pc-title{ font-size: 28px; font-weight: 600; letter-spacing: -0.2px; margin: 0; line-height: 1.1; }
+        .pc-sub{ margin: 4px 0 0; font-size: 14px; color: var(--pc-muted); font-weight: 400; }
 
-        .pc-grid{
-          margin-top: 16px;
-          display:grid;
-          grid-template-columns: 360px 1fr;
-          gap: 16px;
-        }
-        @media (max-width: 980px){
-          .pc-grid{ grid-template-columns: 1fr; }
-        }
+        .pc-grid{ margin-top: 18px; display:grid; grid-template-columns: 360px 1fr; gap: 18px; align-items:start; }
+        @media (max-width: 1020px){ .pc-grid{ grid-template-columns: 1fr; } }
 
         .pc-card{
-          background: var(--pc-card);
-          border: 1px solid var(--pc-border);
+          background: var(--pc-card2);
+          border: 1px solid var(--pc-stroke);
           border-radius: var(--pc-radius);
           box-shadow: var(--pc-shadow2);
-          backdrop-filter: blur(10px);
+          backdrop-filter: blur(14px);
+          padding: 18px;
         }
-        .pc-card.pad{ padding: 16px; }
 
-        .pc-sectionTitle{
-          font-weight: 600;
-          font-size: 13px;
-          letter-spacing: .12em;
-          color: rgba(15,23,42,.70);
+        .pc-card h3{
+          margin: 0 0 10px;
+          font-size: 14px;
+          letter-spacing: 0.14em;
           text-transform: uppercase;
-          margin: 0 0 12px;
-        }
-
-        .pc-field{
-          display:grid;
-          gap: 8px;
-        }
-        .pc-labelRow{
-          display:flex;
-          align-items:center;
-          gap:8px;
-          color: rgba(15,23,42,.70);
-          font-size: 13px;
-          font-weight: 500;
-        }
-        .pc-infoDot{
-          width: 18px; height: 18px;
-          border-radius: 999px;
-          display:inline-flex;
-          align-items:center;
-          justify-content:center;
-          border: 1px solid rgba(15,23,42,.18);
-          color: rgba(15,23,42,.60);
-          font-size: 12px;
+          color: rgba(15,23,42,0.70);
           font-weight: 600;
-          background: rgba(255,255,255,.55);
         }
 
-        input, select{
+        .pc-field{ display:flex; flex-direction: column; gap: 6px; }
+        .pc-label{ font-size: 13px; color: rgba(15,23,42,0.72); font-weight: 500; display:flex; align-items:center; gap: 8px; }
+        .pc-input, .pc-select{
           width: 100%;
-          border-radius: 18px;
-          border: 1px solid rgba(15,23,42,.14);
-          background: rgba(255,255,255,.78);
-          padding: 12px 14px;
-          font-size: 16px;
+          height: 44px;
+          border-radius: 14px;
+          border: 1px solid rgba(15,23,42,0.14);
+          background: rgba(255,255,255,0.72);
+          padding: 0 14px;
           outline: none;
-          font-family: inherit;
+          font-size: 16px;
           font-weight: 400;
-          color: var(--pc-ink);
         }
-        input::placeholder{ color: rgba(15,23,42,.40); }
+        .pc-input:focus, .pc-select:focus{ border-color: rgba(99,102,241,0.55); box-shadow: 0 0 0 4px rgba(99,102,241,0.14); }
+
+        .pc-row{ display:flex; gap: 12px; align-items: center; }
+        .pc-row > * { flex: 1; }
+
+        .pc-note{ margin-top: 10px; color: rgba(15,23,42,0.62); font-size: 14px; font-weight: 400; }
 
         /* Toggle */
-        .pc-switch{
-          display:flex; align-items:center; justify-content:space-between;
-          gap: 10px;
-          padding: 10px 0 4px;
-        }
-        .pc-switchLeft{ display:flex; flex-direction:column; gap:2px; }
-        .pc-switchTitle{ font-weight: 600; font-size: 16px; }
-        .pc-switchHint{ color: var(--pc-muted); font-size: 13px; }
+        .pc-toggle-row{ margin-top: 12px; display:flex; align-items:center; justify-content: space-between; gap: 14px; padding: 12px 12px; border-radius: 18px; background: rgba(255,255,255,0.40); border: 1px solid rgba(15,23,42,0.08); }
+        .pc-toggle-copy{ display:flex; flex-direction: column; gap: 2px; padding-right: 10px; }
+        .pc-toggle-copy b{ font-weight: 600; }
 
-        .pc-toggle{
-          width: 56px; height: 32px;
+        .pc-switch{ position: relative; width: 58px; height: 34px; border: 0; background: transparent; padding: 0; cursor: pointer; }
+        .pc-switch__track{
+          position:absolute; inset:0;
           border-radius: 999px;
-          background: rgba(15,23,42,.10);
-          border: 1px solid rgba(15,23,42,.12);
-          position:relative;
-          cursor:pointer;
-          transition: background .2s ease, box-shadow .2s ease;
-          box-shadow: inset 0 1px 2px rgba(15,23,42,.10);
+          background: rgba(15,23,42,0.12);
+          border: 1px solid rgba(15,23,42,0.12);
+          transition: all .2s ease;
         }
-        .pc-toggle.on{
-          background: linear-gradient(135deg, rgba(255,90,124,.95), rgba(255,140,90,.85));
-          box-shadow: 0 10px 26px rgba(255,90,124,.22);
-        }
-        .pc-knob{
-          width: 26px; height: 26px;
-          border-radius: 999px;
-          background: rgba(255,255,255,.92);
+        .pc-switch__thumb{
           position:absolute;
-          top: 2px; left: 2px;
-          box-shadow: 0 10px 22px rgba(15,23,42,.18);
+          top: 3px; left: 3px;
+          width: 28px; height: 28px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.92);
+          box-shadow: 0 10px 18px rgba(15,23,42,0.16);
           transition: transform .22s ease;
         }
-        .pc-toggle.on .pc-knob{ transform: translateX(24px); }
+        .pc-switch.is-on .pc-switch__track{ background: linear-gradient(135deg, rgba(255,96,96,0.95), rgba(255,140,120,0.90)); border-color: rgba(255,96,96,0.25); }
+        .pc-switch.is-on .pc-switch__thumb{ transform: translateX(24px); }
 
-        .pc-note{
-          margin-top: 10px;
-          color: var(--pc-muted);
-          font-size: 13px;
-          line-height: 1.35;
-          display:flex;
-          gap: 8px;
-          align-items:flex-start;
-        }
+        /* Slabs */
+        .pc-table{ width: 100%; border-collapse: separate; border-spacing: 0; overflow:hidden; border-radius: 18px; border: 1px solid rgba(15,23,42,0.10); }
+        .pc-table th, .pc-table td{ padding: 12px 12px; border-bottom: 1px solid rgba(15,23,42,0.08); }
+        .pc-table th{ text-align:left; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(15,23,42,0.55); font-weight: 600; background: rgba(255,255,255,0.55); }
+        .pc-table tr:last-child td{ border-bottom: 0; }
+        .pc-range{ white-space: nowrap; font-weight: 600; color: rgba(15,23,42,0.70); }
+        .pc-mini{ height: 40px; border-radius: 14px; padding: 0 12px; width: 100%; border: 1px solid rgba(15,23,42,0.14); background: rgba(255,255,255,0.70); font-size: 15px; font-weight: 400; }
+        .pc-table colgroup col:nth-child(1){ width: 44%; }
+        .pc-table colgroup col:nth-child(2){ width: 28%; }
+        .pc-table colgroup col:nth-child(3){ width: 28%; }
 
-        /* Tax slabs */
-        .pc-slabsGrid{
-          border: 1px solid rgba(15,23,42,.10);
-          border-radius: 18px;
-          overflow:hidden;
-          background: rgba(255,255,255,.58);
-        }
-        .pc-slabsHead, .pc-slabRow{
-          display:grid;
-          grid-template-columns: 132px 1fr 1fr; /* equal width CNIC/Passport */
-          gap: 0;
-          align-items:center;
-        }
-        .pc-slabsHead{
-          padding: 12px 12px;
-          background: rgba(15,23,42,.03);
-          font-size: 12px;
-          letter-spacing: .08em;
-          text-transform: uppercase;
-          color: rgba(15,23,42,.65);
-          font-weight: 600;
-        }
-        .pc-slabRow{
-          padding: 12px 12px;
-          border-top: 1px solid rgba(15,23,42,.08);
-          gap: 10px;
-        }
-        .pc-rangePill{
-          width: fit-content;
-          padding: 8px 12px;
-          border-radius: 999px;
-          background: rgba(15,23,42,.05);
-          border: 1px solid rgba(15,23,42,.08);
-          font-weight: 600;
-          color: rgba(15,23,42,.75);
-          font-size: 16px;
-        }
-        .pc-slabRow input{
-          padding: 10px 12px;
-          border-radius: 16px;
-          text-align:center;
-          font-weight: 600;
-        }
+        /* Main / Inventory */
+        .pc-main .pc-card{ padding: 18px; }
 
-        /* Planner */
-        .pc-plannerHead{
-          display:flex; align-items:flex-start; justify-content:space-between; gap: 14px;
-          margin-bottom: 10px;
-        }
+        .pc-inv-head{ display:flex; align-items:flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+        .pc-inv-head .pc-inv-copy{ min-width: 240px; }
+        .pc-inv-head h2{ margin:0; font-size: 14px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 600; color: rgba(15,23,42,0.70); }
+        .pc-inv-head p{ margin: 6px 0 0; color: rgba(15,23,42,0.60); font-size: 14px; font-weight: 400; }
+
         .pc-btn{
-          border: none;
+          display:inline-flex;
+          align-items:center;
+          gap: 10px;
+          height: 44px;
+          padding: 0 16px;
           border-radius: 999px;
-          padding: 12px 16px;
-          cursor:pointer;
-          font-family: inherit;
-          font-weight: 600;
-          font-size: 15px;
+          border: 0;
+          cursor: pointer;
           color: white;
-          background: linear-gradient(135deg, rgba(255,90,124,.96), rgba(255,140,90,.88));
-          box-shadow: 0 16px 34px rgba(255,90,124,.22);
-          display:inline-flex;
-          align-items:center;
-          gap: 10px;
-          white-space: nowrap;
-        }
-        .pc-btn:disabled{
-          opacity:.55;
-          cursor:not-allowed;
-          box-shadow:none;
-        }
-        .pc-btnGhost{
-          border-radius: 999px;
-          padding: 10px 14px;
-          border: 1px solid rgba(15,23,42,.12);
-          background: rgba(255,255,255,.72);
           font-weight: 600;
-          cursor:pointer;
-          display:inline-flex;
-          align-items:center;
-          gap: 10px;
-          white-space: nowrap;
+          background: linear-gradient(135deg, rgba(255,74,74,0.95), rgba(255,140,120,0.92));
+          box-shadow: 0 14px 26px rgba(255,74,74,0.22);
         }
+        .pc-btn:active{ transform: translateY(1px); }
+        .pc-btn:disabled{ opacity: .55; cursor: not-allowed; }
 
-        /* INVENTORY FIX: stable responsive grid + no weird wrapping */
-        .pc-formGrid{
-          display:grid;
-          grid-template-columns: 170px 1.3fr 170px 170px 1.2fr 320px;
-          gap: 12px;
-          align-items:end;
-        }
-        @media (max-width: 1100px){
-          .pc-formGrid{ grid-template-columns: 170px 1fr 170px 170px 1fr; }
-          .pc-formGrid .pc-best{ grid-column: 1 / -1; }
-        }
-        @media (max-width: 720px){
-          .pc-formGrid{ grid-template-columns: 1fr 1fr; }
-          .pc-formGrid .pc-best{ grid-column: 1 / -1; }
-        }
+        .pc-inv-form{ margin-top: 14px; display:grid; grid-template-columns: 220px 1.3fr 220px 220px 1.1fr 1fr; gap: 12px; align-items:end; }
+        @media (max-width: 1140px){ .pc-inv-form{ grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 520px){ .pc-inv-form{ grid-template-columns: 1fr; } }
 
-        .pc-bestBox{
+        .pc-best{
+          height: 44px;
           display:flex;
           align-items:center;
-          justify-content:space-between;
+          justify-content: space-between;
           gap: 10px;
-          padding: 12px 14px;
-          border-radius: 18px;
-          border: 1px solid rgba(15,23,42,.12);
-          background: rgba(255,255,255,.68);
-          min-height: 48px;
-        }
-        .pc-bestBox .k{
-          color: rgba(15,23,42,.66);
+          padding: 0 12px;
+          border-radius: 14px;
+          border: 1px solid rgba(15,23,42,0.14);
+          background: rgba(255,255,255,0.72);
           font-weight: 500;
-          font-size: 13px;
-          line-height:1.2;
           white-space: nowrap;
         }
+        .pc-best .pc-best__tag{ font-weight: 600; }
+        .pc-best .pc-best__amt{ font-variant-numeric: tabular-nums; }
 
+        /* Pills */
         .pc-pill{
-          padding: 8px 12px;
+          display:inline-flex;
+          align-items:center;
+          gap: 8px;
+          padding: 6px 10px;
           border-radius: 999px;
-          border: 1px solid rgba(15,23,42,.12);
-          background: rgba(15,23,42,.04);
-          font-weight: 700;
-          font-size: 13px;
-          white-space: nowrap; /* stops Passport breaking down */
+          font-size: 12px;
+          font-weight: 600;
+          letter-spacing: .02em;
+          border: 1px solid rgba(15,23,42,0.12);
+          background: rgba(255,255,255,0.60);
+          color: rgba(15,23,42,0.78);
+          white-space: nowrap;
         }
-        .pc-pill.good{
-          background: var(--pc-good-bg);
-          border-color: var(--pc-good-bd);
-          color: var(--pc-good);
-        }
-        .pc-pill.bad{
-          background: var(--pc-bad-bg);
-          border-color: var(--pc-bad-bd);
-          color: var(--pc-bad);
-        }
+        .pc-pill--good{ background: rgba(16,185,129,0.14); border-color: rgba(16,185,129,0.25); color: rgba(6,95,70,0.95); }
+        .pc-pill--bad{ background: rgba(239,68,68,0.14); border-color: rgba(239,68,68,0.25); color: rgba(153,27,27,0.95); }
+        .pc-pill--neutral{ background: rgba(99,102,241,0.10); border-color: rgba(99,102,241,0.22); color: rgba(30,41,59,0.90); }
 
         /* Devices */
-        .pc-devHead{
-          display:flex; align-items:baseline; justify-content:space-between;
-          margin: 8px 0 12px;
-        }
-        .pc-devTitle{
-          margin:0;
-          font-size: 34px;
-          font-weight: 600;
-          letter-spacing:-.3px;
-        }
-        .pc-count{
-          color: rgba(15,23,42,.60);
-          font-weight: 500;
-        }
+        .pc-dev-head{ display:flex; align-items:baseline; justify-content: space-between; gap: 10px; margin-top: 14px; }
+        .pc-dev-head h2{ margin:0; font-size: 30px; font-weight: 600; letter-spacing: -0.4px; }
+        .pc-dev-count{ color: rgba(15,23,42,0.55); font-weight: 500; }
 
-        .pc-cards{
-          display:grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 14px;
-        }
-        @media (max-width: 980px){
-          .pc-cards{ grid-template-columns: 1fr; }
-        }
+        .pc-dev-grid{ margin-top: 14px; display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+        @media (max-width: 980px){ .pc-dev-grid{ grid-template-columns: 1fr; } }
 
         .pc-device{
-          background: rgba(255,255,255,.82);
-          border: 1px solid rgba(15,23,42,.10);
-          border-radius: 22px;
-          box-shadow: var(--pc-shadow2);
+          background: rgba(255,255,255,0.70);
+          border: 1px solid rgba(15,23,42,0.10);
+          border-radius: 24px;
+          box-shadow: 0 16px 30px rgba(15,23,42,0.10);
           overflow:hidden;
         }
-        .pc-deviceTop{
-          display:flex;
-          justify-content:space-between;
-          gap: 10px;
-          padding: 14px 14px 10px;
-        }
-        .pc-deviceTop .meta{ min-width:0; }
-        .pc-brand{
-          text-transform: uppercase;
-          letter-spacing: .22em;
-          font-weight: 600;
-          color: rgba(15,23,42,.45);
-          font-size: 12px;
-        }
-        .pc-model{
-          margin-top: 4px;
-          font-size: 24px;
-          font-weight: 600;
-          letter-spacing: -.2px;
-        }
-        .pc-trash{
-          width: 40px; height: 40px;
+        .pc-device__top{ padding: 16px 16px 12px; display:flex; align-items:flex-start; justify-content: space-between; gap: 12px; }
+        .pc-device__brand{ font-size: 12px; letter-spacing: .20em; text-transform: uppercase; color: rgba(15,23,42,0.55); font-weight: 600; }
+        .pc-device__model{ font-size: 22px; font-weight: 600; margin-top: 3px; line-height: 1.12; }
+        .pc-device__chips{ margin-top: 10px; display:flex; gap: 8px; flex-wrap: wrap; }
+        .pc-device__trash{
+          width: 42px; height: 42px;
           border-radius: 14px;
-          border: 1px solid rgba(15,23,42,.12);
-          background: rgba(255,255,255,.82);
+          border: 1px solid rgba(15,23,42,0.12);
+          background: rgba(255,255,255,0.55);
+          display:flex; align-items:center; justify-content:center;
           cursor:pointer;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        }
-        .pc-trash svg{ opacity:.65; }
-
-        .pc-tags{
-          display:flex; gap: 10px; flex-wrap:wrap;
-          padding: 0 14px 12px;
-        }
-        .pc-chip{
-          padding: 8px 12px;
-          border-radius: 999px;
-          background: var(--pc-chip);
-          border: 1px solid rgba(15,23,42,.10);
-          font-weight: 600;
-          color: rgba(15,23,42,.72);
-          font-size: 14px;
-          white-space: nowrap;
         }
 
-        /* DEVICE FIX: CNIC left, Passport right. Numbers never wrap badly */
-        .pc-compare{
-          display:grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
-          padding: 12px 14px 14px;
-          border-top: 1px solid rgba(15,23,42,.08);
-        }
-        @media (max-width: 520px){
-          .pc-compare{ grid-template-columns: 1fr; }
-        }
+        .pc-device__mid{ padding: 14px 16px; border-top: 1px solid rgba(15,23,42,0.08); }
 
-        .pc-side{
-          border: 1px solid rgba(15,23,42,.12);
-          background: rgba(255,255,255,.75);
-          border-radius: 18px;
-          padding: 12px;
-          min-width:0;
-        }
-        .pc-sideHead{
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap: 10px;
-          margin-bottom: 8px;
-        }
-        .pc-sideHead .t{
-          font-weight: 700;
-          letter-spacing: .22em;
-          font-size: 13px;
-          color: rgba(15,23,42,.60);
-          text-transform: uppercase;
-          white-space: nowrap;
-        }
-        .pc-kv{
-          display:grid;
-          grid-template-columns: 1fr auto;
-          gap: 8px 10px;
-          border-top: 1px dashed rgba(15,23,42,.12);
-          padding-top: 10px;
-        }
-        .pc-kv .k{
-          color: rgba(15,23,42,.60);
-          font-weight: 500;
-          white-space: nowrap;
-        }
-        .pc-kv .v{
-          font-variant-numeric: tabular-nums;
-          white-space: nowrap;
-          font-weight: 700;
-          font-size: 16px; /* smaller so big numbers fit */
-          max-width: 100%;
-        }
-        .pc-kv .v.small{ font-size: 15px; }
+        /* CNIC then Passport - stacked (fix wrapping) */
+        .pc-section{ border: 1px solid rgba(15,23,42,0.10); border-radius: 18px; background: rgba(255,255,255,0.62); padding: 12px; }
+        .pc-section + .pc-section{ margin-top: 10px; }
+        .pc-section__head{ display:flex; align-items:center; justify-content: space-between; gap: 10px; }
+        .pc-section__title{ font-size: 12px; letter-spacing: .20em; text-transform: uppercase; font-weight: 700; color: rgba(15,23,42,0.60); }
 
-        .pc-footer{
-          display:grid;
-          grid-template-columns: 1fr auto;
-          gap: 10px;
-          padding: 12px 14px 14px;
-          border-top: 1px solid rgba(15,23,42,.08);
-          color: rgba(15,23,42,.60);
-          font-weight: 500;
-        }
-        .pc-footer .row{
-          display:flex;
-          align-items:center;
-          justify-content:space-between;
-          gap: 10px;
-          font-variant-numeric: tabular-nums;
-        }
-        .pc-footer .row span:last-child{
-          color: rgba(15,23,42,.82);
-          font-weight: 700;
-          white-space: nowrap;
-        }
+        .pc-metrics{ margin-top: 10px; display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+        @media (max-width: 520px){ .pc-metrics{ grid-template-columns: 1fr; } }
 
+        .pc-metric{ padding: 10px 10px; border-radius: 16px; border: 1px solid rgba(15,23,42,0.08); background: rgba(255,255,255,0.66); display:flex; align-items:baseline; justify-content: space-between; gap: 10px; }
+        .pc-metric b{ font-weight: 600; color: rgba(15,23,42,0.70); }
+        .pc-metric span{ font-weight: 600; font-variant-numeric: tabular-nums; text-align:right; min-width: 0; overflow:hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .pc-device__bottom{ padding: 12px 16px 16px; border-top: 1px solid rgba(15,23,42,0.08); background: rgba(255,255,255,0.55); }
+        .pc-kv{ display:flex; align-items:baseline; justify-content: space-between; gap: 10px; margin-top: 6px; }
+        .pc-kv:first-child{ margin-top: 0; }
+        .pc-kv .k{ color: rgba(15,23,42,0.55); font-weight: 600; }
+        .pc-kv .v{ font-weight: 600; font-variant-numeric: tabular-nums; text-align:right; overflow:hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Export bar */
         .pc-export{
           margin-top: 14px;
-          padding: 14px;
           display:flex;
           align-items:center;
-          justify-content:space-between;
+          justify-content: space-between;
           gap: 12px;
-          flex-wrap: wrap;
+          padding: 14px 14px;
+          border-radius: 22px;
+          border: 1px solid rgba(15,23,42,0.10);
+          background: rgba(255,255,255,0.64);
+          box-shadow: 0 14px 26px rgba(15,23,42,0.08);
         }
-        .pc-export .t{
-          color: rgba(15,23,42,.70);
-          font-weight: 500;
-          font-size: 16px;
+        .pc-export p{ margin:0; color: rgba(15,23,42,0.62); font-weight: 500; }
+        .pc-export .pc-export__btns{ display:flex; gap: 10px; }
+        .pc-chip-btn{
+          display:inline-flex; align-items:center; gap: 10px;
+          height: 44px; padding: 0 14px;
+          border-radius: 999px;
+          border: 1px solid rgba(15,23,42,0.12);
+          background: rgba(255,255,255,0.70);
+          cursor:pointer;
+          font-weight: 600;
         }
-        .pc-exportBtns{ display:flex; gap: 10px; }
 
-        .pc-ellipsis{
-          overflow:hidden;
-          text-overflow: ellipsis;
-          max-width: 100%;
+        /* Hidden report (PDF) */
+        .pc-report-wrap{ position: absolute; left: -99999px; top: 0; width: 900px; }
+        .pc-report{
+          width: 900px;
+          background: #ffffff;
+          color: #0f172a;
+          padding: 30px;
+          font-family: 'Saira', system-ui;
         }
+        .pc-report__head{ display:flex; align-items:center; gap: 14px; padding: 14px 14px; border-radius: 18px; background: #f4f6ff; border: 1px solid rgba(15,23,42,0.10); }
+        .pc-report__logo{ width: 190px; height: 54px; border-radius: 14px; background: #ffffff; border: 1px solid rgba(15,23,42,0.10); display:flex; align-items:center; justify-content:center; overflow:hidden; }
+        .pc-report__logo img{ width: 92%; height: 92%; object-fit: contain; }
+        .pc-report__title{ font-size: 22px; font-weight: 600; margin: 0; }
+        .pc-report__sub{ margin: 4px 0 0; color: rgba(15,23,42,0.65); font-size: 13px; font-weight: 400; }
+        .pc-report__hr{ height: 1px; background: rgba(15,23,42,0.10); margin: 18px 0; }
+
+        .pc-report-item{ padding: 14px; border-radius: 18px; border: 1px solid rgba(15,23,42,0.10); background: #fbfbff; margin-bottom: 12px; }
+        .pc-report-item__top{ display:flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+        .pc-report-item__name{ font-weight: 600; font-size: 16px; }
+        .pc-report-item__sale{ font-weight: 600; }
+        .pc-report-item__meta{ margin-top: 6px; color: rgba(15,23,42,0.62); font-size: 13px; }
+        .pc-report-item__grid{ margin-top: 10px; display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .pc-report-box{ padding: 12px; border-radius: 16px; border: 1px solid rgba(15,23,42,0.10); background: #ffffff; }
+        .pc-report-box__title{ font-size: 12px; letter-spacing: .20em; text-transform: uppercase; color: rgba(15,23,42,0.60); font-weight: 700; display:flex; align-items:center; justify-content: space-between; }
+        .pc-report-kv{ display:flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 13px; }
+        .pc-report-kv .k{ color: rgba(15,23,42,0.62); }
+        .pc-report-kv .v{ font-weight: 600; font-variant-numeric: tabular-nums; }
+
+        .pc-foot{ margin-top: 10px; color: rgba(15,23,42,0.55); font-size: 12px; }
       `}</style>
 
-      <div className="pc-bg" aria-hidden="true">
-        {animations && (
-          <>
-            <div className="pc-dots" />
-            <div className="pc-blob b1" />
-            <div className="pc-blob b2" />
-            <div className="pc-blob b3" />
-            <div className="pc-prism p1" />
-            <div className="pc-prism p2" />
-          </>
-        )}
-      </div>
+      <Background enabled={!!settings.animationEnabled} />
 
       <div className="pc-shell">
-        <header className="pc-header">
-          <div className="pc-brandmark" title="PhonesCanada">
-            <img
-              src={logoSrc}
-              alt="PhonesCanada"
-              onError={(e) => (e.currentTarget.style.display = "none")}
-            />
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <h1 className="pc-hTitle">PhonesCanada PTA Dashboard</h1>
-            <div className="pc-hSub">PTA Tax • Landed Cost • Profit (CNIC vs Passport)</div>
-          </div>
-        </header>
-
-        <div className="pc-grid">
-          {/* Left column */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div className="pc-card pad">
-              <div className="pc-sectionTitle">System Preferences</div>
-
-              <div className="pc-field">
-                <div className="pc-labelRow">
-                  USD Rate (PKR) <span className="pc-infoDot">i</span>
-                </div>
-                <input
-                  inputMode="numeric"
-                  value={usdPkr}
-                  onChange={(e) => setUsdPkr(e.target.value)}
-                  placeholder="e.g. 278"
-                />
-              </div>
-
-              <div className="pc-switch">
-                <div className="pc-switchLeft">
-                  <div className="pc-switchTitle">Animations</div>
-                  <div className="pc-switchHint">Smooth blobs + prism outlines</div>
-                </div>
-                <div
-                  className={`pc-toggle ${animations ? "on" : ""}`}
-                  role="switch"
-                  aria-checked={animations}
-                  tabIndex={0}
-                  onClick={() => setAnimations((v) => !v)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") setAnimations((v) => !v);
-                  }}
-                >
-                  <div className="pc-knob" />
-                </div>
-              </div>
-
-              <div className="pc-note">
-                <span>💡</span>
-                <span>
-                  GST auto-switches at <b>$500</b>: 18% below / 25% at or above.
-                </span>
-              </div>
+        <div className="pc-wrap">
+          {/* Header */}
+          <div className="pc-header">
+            <div className="pc-brandmark" title="PhonesCanada">
+              <img src={logoSrc} alt="PhonesCanada" crossOrigin="anonymous" />
             </div>
-
-            <div className="pc-card pad">
-              <div className="pc-sectionTitle">PTA Tax Slabs (Editable)</div>
-
-              <div className="pc-slabsGrid">
-                <div className="pc-slabsHead">
-                  <div>Value Range (USD)</div>
-                  <div style={{ textAlign: "center" }}>CNIC</div>
-                  <div style={{ textAlign: "center" }}>Passport</div>
-                </div>
-
-                {slabs.map((s) => (
-                  <div className="pc-slabRow" key={s.id}>
-                    <div>
-                      <span className="pc-rangePill">{s.label}</span>
-                    </div>
-                    <div>
-                      <input
-                        inputMode="numeric"
-                        value={s.cnic}
-                        onChange={(e) => {
-                          const v = safeNum(e.target.value);
-                          setSlabs((prev) => prev.map((x) => (x.id === s.id ? { ...x, cnic: v } : x)));
-                        }}
-                      />
-                    </div>
-                    <div>
-                      <input
-                        inputMode="numeric"
-                        value={s.passport}
-                        onChange={(e) => {
-                          const v = safeNum(e.target.value);
-                          setSlabs((prev) => prev.map((x) => (x.id === s.id ? { ...x, passport: v } : x)));
-                        }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="pc-note" style={{ marginTop: 12 }}>
-                <span>✅</span>
-                <span>Saved automatically on this device (localStorage).</span>
-              </div>
+            <div>
+              <h1 className="pc-title">PhonesCanada PTA Dashboard</h1>
+              <p className="pc-sub">PTA Tax • Landed Cost • Profit (CNIC vs Passport)</p>
             </div>
           </div>
 
-          {/* Right column */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div className="pc-card pad">
-              <div className="pc-plannerHead">
-                <div>
-                  <div className="pc-sectionTitle" style={{ marginBottom: 6 }}>
-                    Inventory Planning
-                  </div>
-                  <div style={{ color: "var(--pc-muted)", fontSize: 14 }}>
-                    Add a device and instantly compare CNIC vs Passport.
-                  </div>
-                </div>
-
-                <button className="pc-btn" onClick={addDevice} disabled={!inventoryValid}>
-                  <span style={{ fontSize: 18, lineHeight: 0 }}>＋</span> Add Device
-                </button>
-              </div>
-
-              <div className="pc-formGrid">
-                <div className="pc-field">
-                  <div className="pc-labelRow">Brand</div>
-                  <select value={brand} onChange={(e) => setBrand(e.target.value)}>
-                    <option value="">Select…</option>
-                    {BRAND_OPTIONS.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+          <div className="pc-grid">
+            {/* Left */}
+            <div>
+              <div className="pc-card">
+                <h3>System Preferences</h3>
 
                 <div className="pc-field">
-                  <div className="pc-labelRow">Device / Model Name</div>
-                  <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. iPhone 15 Pro Max" />
+                  <div className="pc-label">USD Rate (PKR)</div>
+                  <input
+                    className="pc-input"
+                    value={settings.usdToPkr}
+                    onChange={(e) => setSettings((s) => ({ ...s, usdToPkr: n(e.target.value) }))}
+                    inputMode="numeric"
+                  />
                 </div>
 
-                <div className="pc-field">
-                  <div className="pc-labelRow">
-                    Purchase Cost (USD) <span className="pc-infoDot">i</span>
-                  </div>
-                  <input inputMode="numeric" value={purchaseUSD} onChange={(e) => setPurchaseUSD(e.target.value)} placeholder="e.g. 1199" />
-                </div>
-
-                <div className="pc-field">
-                  <div className="pc-labelRow">
-                    Shipping (USD) <span className="pc-infoDot">i</span>
-                  </div>
-                  <input inputMode="numeric" value={shippingUSD} onChange={(e) => setShippingUSD(e.target.value)} placeholder="e.g. 30" />
-                </div>
-
-                <div className="pc-field">
-                  <div className="pc-labelRow">
-                    Expected Selling Price (PKR) <span className="pc-infoDot">i</span>
-                  </div>
-                  <input inputMode="numeric" value={salePKR} onChange={(e) => setSalePKR(e.target.value)} placeholder="e.g. 525000" />
-                </div>
-
-                <div className="pc-field pc-best">
-                  <div className="pc-labelRow">Profit / Loss (Best)</div>
-                  <div className="pc-bestBox">
-                    <div className="k">
-                      Slab: <b>{slab?.label || "—"} USD</b> • GST: <b>{gstRate}%</b>
-                    </div>
-                    <span className={`pc-pill ${bestBadge.tone === "good" ? "good" : bestBadge.tone === "bad" ? "bad" : ""}`}>
-                      {bestBadge.label}
+                <div className="pc-toggle-row">
+                  <div className="pc-toggle-copy">
+                    <b>Animations</b>
+                    <span style={{ color: "rgba(15,23,42,0.60)", fontSize: 13, fontWeight: 400 }}>
+                      Smooth blobs + prism outlines
                     </span>
                   </div>
+                  <Switch
+                    checked={!!settings.animationEnabled}
+                    onChange={(v) => setSettings((s) => ({ ...s, animationEnabled: !!v }))}
+                    label="Toggle animations"
+                  />
                 </div>
+
+                <div className="pc-note">💡 GST auto-switches at <b>$500</b>: 18% below / 25% at or above.</div>
+              </div>
+
+              <div className="pc-card" style={{ marginTop: 18 }}>
+                <h3>PTA Tax Slabs (Editable)</h3>
+                <table className="pc-table">
+                  <colgroup>
+                    <col />
+                    <col />
+                    <col />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Value Range (USD)</th>
+                      <th>CNIC</th>
+                      <th>Passport</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {slabs.map((s, idx) => (
+                      <tr key={s.range}>
+                        <td className="pc-range">{s.range}</td>
+                        <td>
+                          <input
+                            className="pc-mini"
+                            value={s.cnic}
+                            onChange={(e) => updateSlab(idx, "cnic", e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </td>
+                        <td>
+                          <input
+                            className="pc-mini"
+                            value={s.passport}
+                            onChange={(e) => updateSlab(idx, "passport", e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="pc-foot">Saved automatically on this device (localStorage).</div>
               </div>
             </div>
 
-            <div className="pc-card pad">
-              <div className="pc-devHead">
-                <h2 className="pc-devTitle">Devices</h2>
-                <div className="pc-count">{devices.length} device(s)</div>
-              </div>
+            {/* Right */}
+            <div className="pc-main">
+              <div className="pc-card">
+                <div className="pc-inv-head">
+                  <div className="pc-inv-copy">
+                    <h2>Inventory Planning</h2>
+                    <p>Add a device and instantly compare CNIC vs Passport.</p>
+                  </div>
 
-              <div className="pc-cards">
-                {devices.map((d) => {
-                  const c = computedDevice(d);
+                  <button
+                    className="pc-btn"
+                    onClick={addDevice}
+                    disabled={!n(form.costUsd) || !n(form.expectedSalePkr)}
+                    title="Add Device"
+                  >
+                    <Plus size={18} />
+                    Add Device
+                  </button>
+                </div>
 
-                  const profitPill = (p) => ({
-                    cls: p >= 0 ? "good" : "bad",
-                    text: `${p >= 0 ? "PROFIT" : "LOSS"} • ${fmtPKR(Math.abs(p)).replace("Rs ", "Rs ")}`,
-                  });
+                <div className="pc-inv-form">
+                  <div className="pc-field">
+                    <div className="pc-label">Brand</div>
+                    <select
+                      className="pc-select"
+                      value={form.brand}
+                      onChange={(e) => setForm((f) => ({ ...f, brand: e.target.value }))}
+                    >
+                      <option value="">Select…</option>
+                      {BRANDS.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-                  return (
-                    <div key={d.id} className="pc-device">
-                      <div className="pc-deviceTop">
-                        <div className="meta">
-                          <div className="pc-brand">{d.brand}</div>
-                          <div className="pc-model pc-ellipsis">{d.model}</div>
-                        </div>
-                        <button className="pc-trash" onClick={() => removeDevice(d.id)} title="Remove">
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                            <path d="M9 3h6l1 2h5v2H3V5h5l1-2Zm1 6h2v10h-2V9Zm4 0h2v10h-2V9ZM7 9h2v10H7V9Z" fill="currentColor"/>
-                          </svg>
-                        </button>
-                      </div>
+                  <div className="pc-field">
+                    <div className="pc-label">Device / Model Name</div>
+                    <input
+                      className="pc-input"
+                      value={form.model}
+                      onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
+                      placeholder="e.g. iPhone 15 Pro Max"
+                    />
+                  </div>
 
-                      <div className="pc-tags">
-                        <span className="pc-chip">Slab: {c.slab.label} USD</span>
-                        <span className="pc-chip">GST: {c.gstRate}%</span>
-                      </div>
+                  <div className="pc-field">
+                    <div className="pc-label">Purchase Cost (USD)</div>
+                    <input
+                      className="pc-input"
+                      value={form.costUsd}
+                      onChange={(e) => setForm((f) => ({ ...f, costUsd: e.target.value }))}
+                      placeholder="e.g. 1199"
+                      inputMode="numeric"
+                    />
+                  </div>
 
-                      <div className="pc-compare">
-                        <div className="pc-side">
-                          <div className="pc-sideHead">
-                            <div className="t">CNIC</div>
-                            <span className={`pc-pill ${profitPill(c.profitCNIC).cls}`}>{profitPill(c.profitCNIC).text}</span>
-                          </div>
-                          <div className="pc-kv">
-                            <div className="k">Landed</div>
-                            <div className="v">{fmtPKR(c.landedCNIC)}</div>
-                            <div className="k">Margin</div>
-                            <div className="v small">{fmtPct(c.marginCNIC)}</div>
-                          </div>
-                        </div>
+                  <div className="pc-field">
+                    <div className="pc-label">Shipping (USD)</div>
+                    <input
+                      className="pc-input"
+                      value={form.shippingUsd}
+                      onChange={(e) => setForm((f) => ({ ...f, shippingUsd: e.target.value }))}
+                      placeholder="e.g. 30"
+                      inputMode="numeric"
+                    />
+                  </div>
 
-                        <div className="pc-side">
-                          <div className="pc-sideHead">
-                            <div className="t">Passport</div>
-                            <span className={`pc-pill ${profitPill(c.profitPass).cls}`}>{profitPill(c.profitPass).text}</span>
-                          </div>
-                          <div className="pc-kv">
-                            <div className="k">Landed</div>
-                            <div className="v">{fmtPKR(c.landedPass)}</div>
-                            <div className="k">Margin</div>
-                            <div className="v small">{fmtPct(c.marginPass)}</div>
-                          </div>
-                        </div>
-                      </div>
+                  <div className="pc-field">
+                    <div className="pc-label">Expected Selling Price (PKR)</div>
+                    <input
+                      className="pc-input"
+                      value={form.expectedSalePkr}
+                      onChange={(e) => setForm((f) => ({ ...f, expectedSalePkr: e.target.value }))}
+                      placeholder="e.g. 525000"
+                      inputMode="numeric"
+                    />
+                  </div>
 
-                      <div className="pc-footer">
-                        <div style={{ display: "grid", gap: 8 }}>
-                          <div className="row">
-                            <span>Sale</span>
-                            <span>{fmtPKR(d.salePKR)}</span>
-                          </div>
-                          <div className="row">
-                            <span>Cost+Ship</span>
-                            <span>{fmtUSD(d.purchaseUSD)} + {fmtUSD(d.shippingUSD)}</span>
-                          </div>
-                        </div>
-                        <div style={{ display: "grid", gap: 8, minWidth: 160 }}>
-                          <div className="row">
-                            <span>USD→PKR</span>
-                            <span>{safeNum(usdPkr) || "—"}</span>
-                          </div>
-                          <div className="row">
-                            <span>&nbsp;</span>
-                            <span>&nbsp;</span>
-                          </div>
-                        </div>
-                      </div>
+                  <div className="pc-field">
+                    <div className="pc-label">Profit / Loss (Best)</div>
+                    <div className="pc-best" title="Best outcome between CNIC and Passport">
+                      <span className="pc-best__tag">{formTotals.best}</span>
+                      <span className="pc-best__amt" style={{ color: formTotals.bestProfit >= 0 ? "rgba(6,95,70,0.95)" : "rgba(153,27,27,0.95)" }}>
+                        {formTotals.bestProfit >= 0 ? fmtPKR(formTotals.bestProfit) : `-${fmtPKR(Math.abs(formTotals.bestProfit))}`}
+                      </span>
                     </div>
-                  );
-                })}
+                  </div>
+                </div>
               </div>
 
-              <div className="pc-card pc-export">
-                <div className="t">Export the full device list (CSV) or printable report (PDF).</div>
-                <div className="pc-exportBtns">
-                  <button className="pc-btnGhost" onClick={exportCSV} disabled={devices.length === 0}>
-                    ⬇ CSV
-                  </button>
-                  <button className="pc-btnGhost" onClick={exportPDF} disabled={devices.length === 0}>
-                    ⬇ PDF
-                  </button>
+              <div className="pc-card" style={{ marginTop: 18 }}>
+                <div className="pc-dev-head">
+                  <h2>Devices</h2>
+                  <div className="pc-dev-count">{devices.length} device(s)</div>
+                </div>
+
+                <div className="pc-dev-grid">
+                  {devices.map((d) => {
+                    const t = calc({ ...d, settings, slabs });
+                    const slabLabel = t.slab.range;
+                    const gstPct = Math.round(t.gstRate * 100);
+
+                    const cnicTone = t.profitCnic >= 0 ? "good" : "bad";
+                    const passTone = t.profitPassport >= 0 ? "good" : "bad";
+
+                    return (
+                      <div key={d.id} className="pc-device">
+                        <div className="pc-device__top">
+                          <div>
+                            <div className="pc-device__brand">{d.brand}</div>
+                            <div className="pc-device__model">{d.model}</div>
+                            <div className="pc-device__chips">
+                              <Pill tone="neutral">Slab: {slabLabel} USD</Pill>
+                              <Pill tone="neutral">GST: {gstPct}%</Pill>
+                            </div>
+                          </div>
+                          <button className="pc-device__trash" onClick={() => removeDevice(d.id)} title="Delete">
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+
+                        <div className="pc-device__mid">
+                          {/* CNIC first */}
+                          <div className="pc-section">
+                            <div className="pc-section__head">
+                              <div className="pc-section__title">CNIC</div>
+                              <Pill tone={cnicTone}>
+                                {t.profitCnic >= 0 ? "PROFIT" : "LOSS"} • {t.profitCnic >= 0 ? fmtPKR(t.profitCnic) : `-${fmtPKR(Math.abs(t.profitCnic))}`}
+                              </Pill>
+                            </div>
+
+                            <div className="pc-metrics">
+                              <div className="pc-metric">
+                                <b>Landed</b>
+                                <span title={fmtPKR(t.landedCnic)}>{fmtPKR(t.landedCnic)}</span>
+                              </div>
+                              <div className="pc-metric">
+                                <b>Margin</b>
+                                <span>{t.marginCnic.toFixed(1)}%</span>
+                              </div>
+                              <div className="pc-metric">
+                                <b>Base</b>
+                                <span>{fmtUSD(d.costUsd)} + {fmtUSD(d.shippingUsd)} (USD→PKR {settings.usdToPkr})</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Passport */}
+                          <div className="pc-section">
+                            <div className="pc-section__head">
+                              <div className="pc-section__title">Passport</div>
+                              <Pill tone={passTone}>
+                                {t.profitPassport >= 0 ? "PROFIT" : "LOSS"} • {t.profitPassport >= 0 ? fmtPKR(t.profitPassport) : `-${fmtPKR(Math.abs(t.profitPassport))}`}
+                              </Pill>
+                            </div>
+
+                            <div className="pc-metrics">
+                              <div className="pc-metric">
+                                <b>Landed</b>
+                                <span title={fmtPKR(t.landedPassport)}>{fmtPKR(t.landedPassport)}</span>
+                              </div>
+                              <div className="pc-metric">
+                                <b>Margin</b>
+                                <span>{t.marginPassport.toFixed(1)}%</span>
+                              </div>
+                              <div className="pc-metric">
+                                <b>PTA</b>
+                                <span>{fmtPKR(t.ptaPassport)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="pc-device__bottom">
+                          <div className="pc-kv">
+                            <div className="k">Sale</div>
+                            <div className="v">{fmtPKR(d.expectedSalePkr)}</div>
+                          </div>
+                          <div className="pc-kv">
+                            <div className="k">Cost + Ship</div>
+                            <div className="v">{fmtUSD(d.costUsd)} + {fmtUSD(d.shippingUsd)}</div>
+                          </div>
+                          <div className="pc-kv">
+                            <div className="k">USD→PKR</div>
+                            <div className="v">{fmtInt(settings.usdToPkr)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="pc-export">
+                  <p>Export the full device list (CSV) or printable report (PDF).</p>
+                  <div className="pc-export__btns">
+                    <button className="pc-chip-btn" onClick={exportCSV} disabled={devices.length === 0}>
+                      <Download size={18} /> CSV
+                    </button>
+                    <button className="pc-chip-btn" onClick={exportPDF} disabled={devices.length === 0}>
+                      <Download size={18} /> PDF
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        <div style={{ marginTop: 10, color: "rgba(15,23,42,.55)", fontSize: 12 }}>
-          Logo should be at <b>public/phonescanadalogo-web.png</b>
+        {/* Hidden PDF report (styled) */}
+        <div className="pc-report-wrap">
+          <div className="pc-report" ref={reportRef}>
+            <div className="pc-report__head">
+              <div className="pc-report__logo">
+                <img src={logoSrc} alt="PhonesCanada" crossOrigin="anonymous" />
+              </div>
+              <div>
+                <div className="pc-report__title">PhonesCanada PTA Dashboard — Report</div>
+                <div className="pc-report__sub">
+                  USD/PKR Rate: {fmtInt(settings.usdToPkr)} • GST: {Math.round(settings.gstUnderThreshold * 100)}% / {Math.round(settings.gstAboveThreshold * 100)}% (threshold ${settings.gstThresholdUsd})
+                </div>
+              </div>
+            </div>
+
+            <div className="pc-report__hr" />
+
+            {devices.map((d, idx) => {
+              const t = calc({ ...d, settings, slabs });
+              const gstPct = Math.round(t.gstRate * 100);
+              const slabLabel = t.slab.range;
+              const cnicTone = t.profitCnic >= 0 ? "good" : "bad";
+              const passTone = t.profitPassport >= 0 ? "good" : "bad";
+
+              return (
+                <div key={d.id} className="pc-report-item">
+                  <div className="pc-report-item__top">
+                    <div className="pc-report-item__name">{idx + 1}. {d.brand} {d.model}</div>
+                    <div className="pc-report-item__sale">{fmtPKR(d.expectedSalePkr)}</div>
+                  </div>
+                  <div className="pc-report-item__meta">Slab: {slabLabel} USD • GST: {gstPct}%</div>
+
+                  <div className="pc-report-item__grid">
+                    <div className="pc-report-box">
+                      <div className="pc-report-box__title">
+                        <span>CNIC</span>
+                        <span style={{ color: cnicTone === "good" ? "#065f46" : "#991b1b" }}>
+                          {t.profitCnic >= 0 ? "PROFIT" : "LOSS"}
+                        </span>
+                      </div>
+                      <div className="pc-report-kv"><span className="k">Base (Cost+Ship)</span><span className="v">{fmtUSD(d.costUsd)} + {fmtUSD(d.shippingUsd)} (USD→PKR {fmtInt(settings.usdToPkr)})</span></div>
+                      <div className="pc-report-kv"><span className="k">Landed</span><span className="v">{fmtPKR(t.landedCnic)}</span></div>
+                      <div className="pc-report-kv"><span className="k">Profit</span><span className="v" style={{ color: cnicTone === "good" ? "#065f46" : "#991b1b" }}>{t.profitCnic >= 0 ? fmtPKR(t.profitCnic) : `-${fmtPKR(Math.abs(t.profitCnic))}`}</span></div>
+                      <div className="pc-report-kv"><span className="k">Margin</span><span className="v">{t.marginCnic.toFixed(1)}%</span></div>
+                    </div>
+
+                    <div className="pc-report-box">
+                      <div className="pc-report-box__title">
+                        <span>Passport</span>
+                        <span style={{ color: passTone === "good" ? "#065f46" : "#991b1b" }}>
+                          {t.profitPassport >= 0 ? "PROFIT" : "LOSS"}
+                        </span>
+                      </div>
+                      <div className="pc-report-kv"><span className="k">Base (Cost+Ship)</span><span className="v">{fmtUSD(d.costUsd)} + {fmtUSD(d.shippingUsd)} (USD→PKR {fmtInt(settings.usdToPkr)})</span></div>
+                      <div className="pc-report-kv"><span className="k">Landed</span><span className="v">{fmtPKR(t.landedPassport)}</span></div>
+                      <div className="pc-report-kv"><span className="k">Profit</span><span className="v" style={{ color: passTone === "good" ? "#065f46" : "#991b1b" }}>{t.profitPassport >= 0 ? fmtPKR(t.profitPassport) : `-${fmtPKR(Math.abs(t.profitPassport))}`}</span></div>
+                      <div className="pc-report-kv"><span className="k">Margin</span><span className="v">{t.marginPassport.toFixed(1)}%</span></div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="pc-foot">Generated by PhonesCanada PTA Dashboard</div>
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
