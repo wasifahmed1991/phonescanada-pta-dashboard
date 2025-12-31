@@ -853,14 +853,6 @@ body {
   margin: 0 auto;
 }
 
-/* ===== Background ===== */
-.pc-bg {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-}
-
 .pc-bgGradient {
   position: absolute;
   inset: -20%;
