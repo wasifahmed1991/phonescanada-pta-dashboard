@@ -101,6 +101,7 @@ function bestOfTwo(c, p) {
 }
 
 export default function App() {
+  // Set the default USD rate to 278, but allow it to be overridden by a value from localStorage.
   const [usdRate, setUsdRate] = useState(() => clampNum(localStorage.getItem(LS_KEYS.usdRate), DEFAULT_USD_RATE));
   const [animationsOn, setAnimationsOn] = useState(() => localStorage.getItem(LS_KEYS.anim) !== "0");
   const [slabs, setSlabs] = useState(() => normalizeSlabs(JSON.parse(localStorage.getItem(LS_KEYS.slabs) || "null"), DEFAULT_SLABS));
